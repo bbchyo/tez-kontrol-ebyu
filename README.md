@@ -1,7 +1,6 @@
 # EBYÜ Tez Format Kontrolcüsü
 
-Erzincan Binali Yıldırım Üniversitesi Sosyal Bilimler Enstitüsü **2022 Tez Yazım Kılavuzu**'na göre tez formatı kontrol programı. bbc
-
+Erzincan Binali Yıldırım Üniversitesi Sosyal Bilimler Enstitüsü **2022 Tez Yazım Kılavuzu**'na göre tez formatı kontrol programı. Arş. Gör. Hakkı Halil BABACAN (bbc_h) ve BAGG AI LTD. tarafından geliştirilmiş ve test edilmiş bir programdır. 
 ![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)
 ![Streamlit](https://img.shields.io/badge/Streamlit-1.0+-red.svg)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
