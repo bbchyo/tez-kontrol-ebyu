@@ -1,0 +1,28 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+.venv/
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Test files
+TEST_*.docx
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+10516005 (1).docx
+create_test_file.py
+test_run.py
