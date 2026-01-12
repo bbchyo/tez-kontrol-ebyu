@@ -1,9 +1,12 @@
 # EBYÜ Tez Format Kontrolcüsü
 
 Erzincan Binali Yıldırım Üniversitesi Sosyal Bilimler Enstitüsü **2022 Tez Yazım Kılavuzu**'na göre tez formatı kontrol programı. Arş. Gör. Hakkı Halil BABACAN (bbc_h) ve BAGG AI LTD. tarafından geliştirilmiş ve test edilmiş bir programdır. 
+
 ![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)
 ![Streamlit](https://img.shields.io/badge/Streamlit-1.0+-red.svg)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
+
+<a href="https://buymeacoffee.com/bbc_h" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="40" ></a>
 
 ## 📋 Özellikler
 
@@ -141,7 +144,13 @@ MIT License - Serbestçe kullanabilir, değiştirebilir ve dağıtabilirsiniz.
 4. Push edin (`git push origin feature/yeni-ozellik`)
 5. Pull Request açın
 
-https://buymeacoffee.com/bbc_h
+## ☕ Destek
+
+Bu proje size yardımcı olduysa, bana bir kahve ısmarlayabilirsiniz!
+
+<a href="https://buymeacoffee.com/bbc_h" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="50" ></a>
+
+**Geliştirici:** [@bbc_h](https://buymeacoffee.com/bbc_h)
 
 ## 📚 Referans
 

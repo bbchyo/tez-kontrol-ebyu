@@ -104,6 +104,18 @@ def create_sidebar_config() -> ThesisConfig:
     if st.sidebar.button("🔄 Varsayılana Dön", use_container_width=True):
         st.rerun()
     
+    # Buy Me a Coffee
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("""
+    <a href="https://buymeacoffee.com/bbc_h" target="_blank">
+        <img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" 
+             alt="Buy Me A Coffee" height="40" style="border-radius: 8px;">
+    </a>
+    <p style="font-size: 0.8rem; color: #666; margin-top: 5px;">
+        Geliştirici: <strong>@bbc_h</strong>
+    </p>
+    """, unsafe_allow_html=True)
+    
     return config
 
 
