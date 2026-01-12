@@ -141,6 +141,8 @@ MIT License - Serbestçe kullanabilir, değiştirebilir ve dağıtabilirsiniz.
 4. Push edin (`git push origin feature/yeni-ozellik`)
 5. Pull Request açın
 
+https://buymeacoffee.com/bbc_h
+
 ## 📚 Referans
 
 Bu program [EBYÜ Sosyal Bilimler Enstitüsü 2022 Tez Yazım Kılavuzu](https://sbe.ebyu.edu.tr/) kurallarına göre geliştirilmiştir.
