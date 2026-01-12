@@ -12,7 +12,14 @@ Kapsamlı kontroller:
 import re
 from typing import List, Dict, Any, Optional, Set, Tuple
 from collections import defaultdict
-from zemberek import TurkishMorphology
+
+# Zemberek opsiyonel (Python 3.13+ ile uyumsuz)
+try:
+    from zemberek import TurkishMorphology
+    ZEMBEREK_AVAILABLE = True
+except ImportError:
+    TurkishMorphology = None
+    ZEMBEREK_AVAILABLE = False
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Pt, Cm
@@ -1425,6 +1432,10 @@ class ThesisChecker:
         ))
     def _check_spelling(self):
         """Türkçe yazım denetimi yap (Zemberek) - Abstract ve Kaynakça hariç"""
+        # Zemberek yoksa atla (Python 3.13+ uyumsuzluğu)
+        if not ZEMBEREK_AVAILABLE:
+            return
+            
         if self.tool is None:
             try:
                 self.tool = TurkishMorphology.create_with_defaults()
