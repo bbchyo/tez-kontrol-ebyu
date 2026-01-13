@@ -378,22 +378,39 @@ class ThesisChecker:
             
             # === Başlık Kontrolü Sonrası ===
             # Eğer başlık ise normal paragraf kontrollerini (girinti, aralık vb) atla
-            if is_table_caption(text) or is_figure_caption(text) or is_chapter_heading(text) or \
-               (self.last_chapter_para_idx != -1 and i == self.last_chapter_para_idx + 1) or \
-               is_numbered_heading(text)[0]:
+            is_cap = is_table_caption(text) or is_figure_caption(text)
+            is_ch = is_chapter_heading(text) or (self.last_chapter_para_idx != -1 and i == self.last_chapter_para_idx + 1)
+            is_num_h, _ = is_numbered_heading(text)
+            
+            if is_cap or is_ch or is_num_h:
+                # Özel başlık kontrollerini çalıştır
+                if is_table_caption(text):
+                    self._check_table_caption(text, location)
+                    para_issues.extend(self._check_caption_format(paragraph, text, "Tablo"))
+                elif is_figure_caption(text):
+                    self._check_figure_caption(text, location)
+                    para_issues.extend(self._check_caption_format(paragraph, text, "Şekil"))
+                elif is_ch:
+                    self.headings_found.append(text.upper())
+                    para_issues.extend(self._check_chapter_heading_format(paragraph, text, i))
+                elif is_num_h:
+                    self.headings_found.append(text.upper())
+                    para_issues.extend(self._check_subheading_format(paragraph, text))
+
+                # Hataları kaydet ve vurgula
+                if para_issues:
+                    self._highlight_paragraph(paragraph, self.colors["STYLE"])
+                    for issue in para_issues:
+                        self.errors.append(FormatError(
+                            category=issue["category"],
+                            message=issue["message"],
+                            location=location,
+                            expected=issue.get("expected", ""),
+                            found=issue.get("found", ""),
+                            snippet=get_text_snippet(text, 80)
+                        ))
                 
-                # Hataları kaydet
-                for issue in para_issues:
-                    self.errors.append(FormatError(
-                        category=issue["category"],
-                        message=issue["message"],
-                        location=location,
-                        expected=issue.get("expected", ""),
-                        found=issue.get("found", ""),
-                        snippet=get_text_snippet(text, 80)
-                    ))
-                
-                # Bölüm başlığı sonrası 7cm ve 4 satır kontrolü
+                # Bölüm başlığı sonrası kuralları çalıştır
                 if is_chapter_heading(text):
                     self._check_chapter_start_rules(i, location)
                 continue
@@ -426,6 +443,7 @@ class ThesisChecker:
                 ))
             
             # Bölüm başlığı sonrası 7cm ve 4 satır kontrolü (Sadece 'BÖLÜM X' sonrası asıl başlığın altı için değil, bizzat başlık için)
+            # Not: Ana loop içinde başlıklar için girinti/boşluk kontrolü bypass edildiği için burada bizzat başlığı kontrol ediyoruz.
             if is_chapter_heading(text):
                 self._check_chapter_start_rules(i, location)
 
@@ -997,20 +1015,19 @@ class ThesisChecker:
             if not has_visible_borders(table):
                 continue
                 
-            # 2. Yerleşim Kontrolü
-            # Kapak sayfası veya yapısal tabloları (ilk tablolar) otomatik atla
-            # Eğer tablo ilk bölümlerdeyse ve yakınında "Tablo X" başlığı yoksa layout sayılır.
-            if i < 5:
-                # Yakınında (üstteki 3 paragraf) başlık var mı kontrol et
-                # Not: i tablo indexidir, paragraph indexine ulaşıp bakmak daha doğru
-                # Ancak self.document.paragraphs üzerinden arama yapmak pahalı olabilir.
-                # Heuristik: Eğer tablo indexi 0-2 arasıysa (ilk 3 tablo) kesin atla.
-                if i < 3:
-                    continue
-                
-                # 3. ve 4. tablolar için de gürültü azaltma (Görünür kenarlık kontrolü zaten yapıldı)
-                # Kılavuza göre ilk sayfalarda çok fazla tablo gürültüsü olabiliyor.
-                pass 
+            # 2. Bağlam Kontrolü (Tablo metni içermeyen tabloları atla)
+            has_table_marker = False
+            for row in table.rows:
+                for cell in row.cells:
+                    if any(x in cell.text.upper() for x in ["TABLO", "TABLE"]):
+                        has_table_marker = True
+                        break
+                if has_table_marker: break
+            
+            if not has_table_marker:
+                continue
+
+            # 3. Yerleşim Kontrolü
             
             wrong_sizes = set()
             wrong_fonts = set()
@@ -1305,13 +1322,14 @@ class ThesisChecker:
             self.total_checks += 1
             
             # 1. Mesafe kontrolü (1.25 cm)
+            # Word ve yazıcı sürücüleri nedeniyle geniş bir tolerans (0.4cm - 2.5cm) uyguluyoruz.
             footer_dist = section.footer_distance.cm if section.footer_distance else 0
-            if abs(footer_dist - 1.25) > 0.1:
+            if not (0.4 <= footer_dist <= 2.5):
                 self.errors.append(FormatError(
                     category=ErrorCategory.NUMBERING,
-                    message=f"Sayfa numarası (footer) mesafesi {footer_dist:.2f} cm (1.25 cm olmalı)",
+                    message=f"Sayfa numarası (footer) mesafesi {footer_dist:.2f} cm (0.4 - 2.5 cm arası kabul edilir)",
                     location=f"Bölüm {i+1} Alt Bilgi",
-                    expected="1.25 cm",
+                    expected="0.4 - 2.5 cm",
                     found=f"{footer_dist:.2f} cm"
                 ))
             else:
@@ -1384,6 +1402,16 @@ class ThesisChecker:
             for footnote in footnotes:
                 paragraphs = footnote.findall('.//w:p', nsmap)
                 for p_xml in paragraphs:
+                    # === GÜRÜLTÜ FİLTRESİ ===
+                    # Metni bul (w:t elementlerini topla)
+                    p_text = "".join(p_xml.xpath('.//w:t/text()', namespaces=nsmap)).strip()
+                    # 1. Çok kısa metinler (Dipnot numarası veya separator çizgisi)
+                    if not p_text or len(p_text) < 3:
+                        continue
+                    # 2. Sadece çizgiden oluşan veya boşluk içeren paragrafları atla
+                    if all(char in '-_ \t\n\r' for char in p_text):
+                        continue
+
                     # 1. Font ve Boyut (Runs)
                     runs = p_xml.findall('.//w:r', nsmap)
                     for r_xml in runs:
