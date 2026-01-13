@@ -426,32 +426,38 @@ def is_numbered_heading(text: str) -> Tuple[bool, Optional[int]]:
     Metnin numaralı başlık olup olmadığını kontrol eder.
     
     Döndürür:
-        (is_heading, level) - level: 1, 2, veya 3
-    
-    Örnekler:
-        "1. Giriş" -> (True, 1)
-        "1.1. Alt Başlık" -> (True, 2)
-        "1.1.1. Alt Alt Başlık" -> (True, 3)
-        "3. sınıf öğrencileri..." -> (False, None) - küçük harfle başlıyor
+        (is_heading, level) - level: 1, 2, 3, veya 4
     """
     text = text.strip()
+    if not text:
+        return (False, None)
     
-    # 1.1.1. format (3. seviye) - numara sonrası BÜYÜK harf ile başlamalı
-    match = re.match(r"^\d+\.\d+\.\d+\.\s+([A-ZÇĞİÖŞÜ])", text)
-    if match:
+    # 1.1.1.1. format (4. seviye)
+    if re.match(r"^\d+\.\d+\.\d+\.\d+\.?\s+[A-ZÇĞİÖŞÜa-zçğiöşü\d]", text):
+        return (True, 4)
+    
+    # 1.1.1. format (3. seviye)
+    if re.match(r"^\d+\.\d+\.\d+\.?\s+[A-ZÇĞİÖŞÜa-zçğiöşü\d]", text):
         return (True, 3)
     
     # 1.1. format (2. seviye)
-    match = re.match(r"^\d+\.\d+\.\s+([A-ZÇĞİÖŞÜ])", text)
-    if match:
+    if re.match(r"^\d+\.\d+\.?\s+[A-ZÇĞİÖŞÜa-zçğiöşü\d]", text):
         return (True, 2)
     
     # 1. format (1. seviye)
-    match = re.match(r"^\d+\.\s+([A-ZÇĞİÖŞÜ])", text)
-    if match:
+    if re.match(r"^\d+\.?\s+[A-ZÇĞİÖŞÜa-zçğiöşü]", text) and len(text) < 200:
         return (True, 1)
     
     return (False, None)
+
+
+def is_toc_title(text: str) -> bool:
+    """Metnin İçindekiler, Tablolar Listesi vb. bir liste başlığı olup olmadığını kontrol eder."""
+    text = text.strip().upper()
+    titles = ["İÇİNDEKİLER", "TABLOLAR LİSTESİ", "ŞEKİLLER LİSTESİ", "SİMGELER VE KISALTMALAR LİSTESİ", "ÖN SÖZ", "ÖNSÖZ"]
+    return any(t == text for t in titles) or (len(text) < 30 and any(t in text for t in titles))
+
+
 
 
 def is_table_caption(text: str) -> bool:
@@ -763,3 +769,52 @@ def is_source_citation(text: str) -> bool:
         return False
     text_upper = text.strip().upper()
     return text_upper.startswith("KAYNAK:") or text_upper.startswith("SOURCE:")
+
+
+def is_ghost_table(table) -> bool:
+    """
+    Görünmez veya layout amaçlı kullanılan tabloları (Ghost Tables) tespit eder.
+    - Kenarlığı yoksa
+    - Sadece 1-2 hücresi varsa
+    - İçindekiler metni içeriyorsa
+    """
+    # 1. Kenarlık Kontrolü
+    if not has_visible_borders(table):
+        return True
+    
+    # 2. Boyut Kontrolü
+    if len(table.rows) < 2 or (len(table.rows) == 1 and len(table.columns) < 2):
+        return True
+    
+    # 3. İçerik Yoğunluğu / TOC Kontrolü
+    points_found = False
+    toc_keywords = 0
+    total_cells = 0
+    
+    for row in table.rows[:3]: # Sadece ilk 3 satıra bak
+        for cell in row.cells:
+            total_cells += 1
+            text = cell.text.strip()
+            if '....' in text:
+                points_found = True
+            if any(k in text.upper() for k in ["İÇİNDEKİLER", "SAYFA", "BÖLÜM"]):
+                toc_keywords += 1
+                
+    if points_found or (total_cells > 0 and toc_keywords / total_cells > 0.5):
+        return True
+        
+    return False
+
+
+def is_abbreviation_list_item(text: str) -> bool:
+    """
+    Metnin bir kısaltma listesi öğesi olup olmadığını kontrol eder.
+    Örnek: 'AYM : Anayasa Mahkemesi'
+    """
+    if not text or len(text) > 150:
+        return False
+    
+    # 'Kısaltma : Açıklama' formatı
+    pattern = r'^[A-ZÇĞİÖŞÜ]{2,10}\s*[:\-\t]\s*.+'
+    return bool(re.match(pattern, text.strip()))
+

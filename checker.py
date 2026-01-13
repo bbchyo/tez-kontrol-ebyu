@@ -20,11 +20,13 @@ from docx.oxml.ns import qn
 from config import ThesisConfig, FormatError, ErrorCategory, DEFAULT_CONFIG
 from utils import (
     emu_to_cm, twips_to_cm, get_font_size_pt, get_text_snippet, count_words,
-    is_chapter_heading, is_numbered_heading,
+    is_chapter_heading, is_numbered_heading, is_toc_title,
     is_table_caption, is_figure_caption, is_uppercase_text,
     is_dialogue_or_transcript, is_list_item, is_source_citation,
+    is_ghost_table, is_abbreviation_list_item,
     has_visible_borders, StyleResolver
 )
+
 
 
 # Kapak sayfası desenleri
@@ -309,6 +311,11 @@ class ThesisChecker:
             # Alternatif: Font kontrolünü loop'un en başına alalım
             location = f"Paragraf {i + 1}"
             
+            # CRITICAL: TOC stil paragraflarını atla (toc 1, toc 2, toc 3)
+            style_name = paragraph.style.name.lower() if paragraph.style else ""
+            if style_name.startswith("toc"):
+                continue
+            
             # Kapak ve özel sayfaları atla (diğer kurallar için)
             is_skipped_for_format = False
             if self._is_cover_or_skip(i, text):
@@ -326,7 +333,7 @@ class ThesisChecker:
             
             # ÖNEMLİ: Font hatası skip kurallarına takılmamalı
             # Sadece çok kısa (1-2 harf) veya boş satırları font için atlayalım
-            if len(text) > 3:
+            if len(text) > 3 and not is_abbreviation_list_item(text):
                 f_err = self._check_font(paragraph)
                 if f_err:
                     self._highlight_paragraph(paragraph, self.colors["STYLE"])
@@ -338,6 +345,7 @@ class ThesisChecker:
                         found=f_err.get("found", ""),
                         snippet=get_text_snippet(text, 80)
                     ))
+
 
             if is_skipped_for_format:
                 continue
@@ -380,8 +388,9 @@ class ThesisChecker:
             is_cap = is_table_caption(text) or is_figure_caption(text)
             is_ch = is_chapter_heading(text) or (self.last_chapter_para_idx != -1 and i == self.last_chapter_para_idx + 1)
             is_num_h, _ = is_numbered_heading(text)
-            
-            if is_cap or is_ch or is_num_h:
+            is_toc = is_toc_title(text)
+
+            if is_cap or is_ch or is_num_h or is_toc:
                 # Başlık-özel kontrolleri (Boyut, Font, Hizalama vb.)
                 if is_table_caption(text):
                     self._check_table_caption(text, location)
@@ -395,6 +404,9 @@ class ThesisChecker:
                 elif is_num_h:
                     self.headings_found.append(text.upper())
                     para_issues.extend(self._check_subheading_format(paragraph, text))
+                elif is_toc:
+                    # İçindekiler vb. başlıkları sadece temel font/boyut kontrolünden geçer
+                    pass
 
                 # Hataları kaydet ve vurgula
                 if para_issues:
@@ -415,6 +427,7 @@ class ThesisChecker:
                 
                 # CRITICAL: Başlıklar paragraf kontrollerine girmemeli
                 continue
+
 
             # === 3. Blok Alıntı Kontrolü ===
             if self._is_block_quote(paragraph):
@@ -603,8 +616,8 @@ class ThesisChecker:
         if not self.document:
             return
             
-        from docx.oxml.ns import nsmap
-        from utils import is_table_caption, is_figure_caption
+        from utils import is_table_caption, is_figure_caption, is_ghost_table
+        from docx.table import Table
         
         body = self.document._element.body
         elements = body.xpath('.//w:p | .//w:tbl')
@@ -613,7 +626,13 @@ class ThesisChecker:
         for i, element in enumerate(elements):
             # TABLO KONTROLÜ (Başlık Üstte olmalı)
             if element.tag.endswith('tbl'):
+                # Ghost table mı?
+                tbl_obj = Table(element, self.document)
+                if is_ghost_table(tbl_obj):
+                    continue
+                    
                 table_count += 1
+
                 # Önceki 1-3 elemente bak (boşlukları atla)
                 found_caption = False
                 for j in range(1, 4):
@@ -919,8 +938,9 @@ class ThesisChecker:
                     continue
                 
                 # Kısa metinler, sadece numara olanlar veya kısaltma tanımları (A: B şeklinde)
-                if is_structural_header or text.isdigit() or len(text.split()) < 3 or (":" in text and len(text.split(":")[0]) < 10):
+                if is_structural_header or text.isdigit() or len(text.split()) < 3 or (":" in text and len(text.split(":")[0]) < 10) or is_abbreviation_list_item(text):
                     continue
+
 
                 ref_count += 1
                 issues = []
@@ -1014,32 +1034,20 @@ class ThesisChecker:
     
     def _check_tables(self):
         """Tablo içeriklerini kontrol et - Akıllı Filtreleme ile"""
-        from utils import has_visible_borders, is_table_caption
+        from utils import has_visible_borders, is_table_caption, is_ghost_table
         
         for i, table in enumerate(self.document.tables):
             table_name = f"Tablo {i + 1}"
             
-            # 1. Kenarlık ve Satır Sayısı Kontrolü
-            # Görünür kenarlık yoksa veya 2 satırdan az ise kesinlikle LAYOUT tablodur
-            if not has_visible_borders(table) or len(table.rows) < 2:
+            # 1. Ghost Table Kontrolü (Gelişmiş Filtreleme)
+            if is_ghost_table(table):
                 continue
                 
-            # 2. Bağlam Kontrolü (Tablo metni içermeyen tabloları atla)
-            has_table_marker = False
-            for row in table.rows:
-                for cell in row.cells:
-                    if any(x in cell.text.upper() for x in ["TABLO", "TABLE"]):
-                        has_table_marker = True
-                        break
-                if has_table_marker: break
-            
-            if not has_table_marker:
-                continue
-
-            # 3. Yerleşim Kontrolü
-            
+            # 2. İçerik ve Font Kontrolü
             wrong_sizes = set()
             wrong_fonts = set()
+            meaningful_content = False
+
             
             for row in table.rows:
                 for cell in row.cells:
@@ -1082,35 +1090,46 @@ class ThesisChecker:
                 ))
     
     def _is_paragraph_bold(self, para) -> bool:
-        """Paragrafın koyu olup olmadığını kontrol et (StyleResolver kullanarak kalıtımla)"""
-        if not self.resolver:
-            return False
-
-        # 1. Stil bizzat kalınlık dayatıyor mu? (e.g. Heading 1)
-        if self.resolver.get_effective_font_bold(para) is True:
+        """
+        Determines if a paragraph is visually bold.
+        CRITICAL FIX: If style is a 'Heading' style, assume Bold is TRUE by default.
+        """
+        # 1. Check Style Name strategy (Benefit of the Doubt for Heading styles)
+        if para.style and para.style.name.startswith("Heading"):
             return True
+        
+        # 2. Check Style Font property via StyleResolver
+        if self.resolver:
+            style_bold = self.resolver.get_effective_font_bold(para)
+            if style_bold is True:
+                return True
 
-        # 2. Karakter bazlı eşik analizi
+        # 3. Check Runs (Majority Vote)
         bold_chars = 0
         total_chars = 0
-        
         for run in para.runs:
-            clean_text = run.text.strip()
-            if not clean_text:
+            text = run.text.strip()
+            if not text:
                 continue
+            total_chars += len(text)
             
-            text_len = len(clean_text)
-            total_chars += text_len
+            # If run.bold is True -> It's bold
+            # If run.bold is None -> It inherits. If it's a Heading, inheritance = Bold.
+            is_bold = run.font.bold
+            if is_bold is None:
+                # Fallback for inheritance
+                if para.style and para.style.name.startswith("Heading"):
+                    is_bold = True
+                elif self.resolver:
+                    is_bold = self.resolver.is_run_bold(run, para)
             
-            # Run bazlı kalınlık (Manuel + Karakter Stili + Paragraf Stili)
-            if self.resolver.is_run_bold(run, para):
-                bold_chars += text_len
-        
+            if is_bold:
+                bold_chars += len(text)
+                
         if total_chars == 0:
             return False
-            
-        # Paragrafın %80'inden fazlası koyu ise (dipnot/numara kaynaklı sapmaları önlemek için)
-        return (bold_chars / total_chars) > 0.8
+        # If 70% of characters are bold, consider the paragraph bold
+        return (bold_chars / total_chars) > 0.7
     
     def _check_font(self, para) -> Optional[Dict]:
         """Font kontrolü - StyleResolver kullanarak kalıtımı çözer."""
