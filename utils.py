@@ -247,8 +247,23 @@ class StyleResolver:
                 return style.font.size.pt
             style = style.base_style
             
-        # 3. Döküman Varsayılanları
+    # 3. Döküman Varsayılanları
         return self.doc_defaults.get("font_size") or 11.0
+
+    def get_effective_bold(self, run) -> bool:
+        """Run için geçerli kalınlık (bold) özelliğini bulur."""
+        # 1. Manuel Formatlama
+        if run.bold is not None:
+            return run.bold
+            
+        # 2. Paragraf Stili ve Kalıtım
+        style = run._parent.style if hasattr(run._parent, 'style') else None
+        while style:
+            if hasattr(style, 'font') and style.font.bold is not None:
+                return style.font.bold
+            style = style.base_style
+            
+        return False
 
     def get_effective_paragraph_attribute(self, paragraph, attr_name: str) -> Any:
         """Paragraf özelliği için kalıtımı çözer (space_before, alignment vb.)"""

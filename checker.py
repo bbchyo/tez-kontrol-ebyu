@@ -376,44 +376,28 @@ class ThesisChecker:
 
             para_issues = []
             
-            # Tablo/şekil başlığı kontrolü
-            if is_table_caption(text):
-                self._check_table_caption(text, location)
-                caps = self._check_caption_format(paragraph, text, "Tablo")
-                if caps:
-                    self._highlight_paragraph(paragraph, self.colors["STYLE"])
-                para_issues.extend(caps)
-            elif is_figure_caption(text):
-                self._check_figure_caption(text, location)
-                caps = self._check_caption_format(paragraph, text, "Şekil")
-                if caps:
-                    self._highlight_paragraph(paragraph, self.colors["STYLE"])
-                para_issues.extend(caps)
-            
-            # Bölüm başlığı
-            elif is_chapter_heading(text) or (self.last_chapter_para_idx != -1 and i == self.last_chapter_para_idx + 1):
-                self.headings_found.append(text.upper())
-                issues = self._check_chapter_heading_format(paragraph, text, i)
-                if issues:
-                    self._highlight_paragraph(paragraph, self.colors["STYLE"])
-                para_issues.extend(issues)
-            
-            # Numaralı başlık
-            elif is_numbered_heading(text)[0]:
-                self.headings_found.append(text.upper())
-                issues = self._check_subheading_format(paragraph, text)
-                if issues:
-                    color = self.colors["STYLE"] if any(i["category"] in [ErrorCategory.FONT, ErrorCategory.FONT_SIZE, ErrorCategory.HEADING] for i in issues) else self.colors["LAYOUT"]
-                    self._highlight_paragraph(paragraph, color)
-                para_issues.extend(issues)
-            
-            # Blok Alıntı (Girintilere göre tespit et)
-            elif self._is_block_quote(paragraph):
-                issues = self._check_block_quote_format(paragraph, text)
-                if issues:
-                    self._highlight_paragraph(paragraph, self.colors["LAYOUT"])
-                para_issues.extend(issues)
-            
+            # === Başlık Kontrolü Sonrası ===
+            # Eğer başlık ise normal paragraf kontrollerini (girinti, aralık vb) atla
+            if is_table_caption(text) or is_figure_caption(text) or is_chapter_heading(text) or \
+               (self.last_chapter_para_idx != -1 and i == self.last_chapter_para_idx + 1) or \
+               is_numbered_heading(text)[0]:
+                
+                # Hataları kaydet
+                for issue in para_issues:
+                    self.errors.append(FormatError(
+                        category=issue["category"],
+                        message=issue["message"],
+                        location=location,
+                        expected=issue.get("expected", ""),
+                        found=issue.get("found", ""),
+                        snippet=get_text_snippet(text, 80)
+                    ))
+                
+                # Bölüm başlığı sonrası 7cm ve 4 satır kontrolü
+                if is_chapter_heading(text):
+                    self._check_chapter_start_rules(i, location)
+                continue
+
             # Normal paragraf
             elif not self.in_references:
                 issues = self._check_normal_paragraph_format(paragraph, text)
@@ -882,11 +866,13 @@ class ThesisChecker:
                 in_ref = True
                 continue
             
-            if in_ref and text:
-                # Kaynakça bitti mi kontrol et
-                if is_chapter_heading(text) or text.upper().startswith("EK"):
-                    break
-                
+                # 0. Gürültü Filtresi: Başlık ve boş satırları atla
+                text_upper = text.upper()
+                if any(x in text_upper for x in ["KISALTMALAR LİSTESİ", "ÖZ GEÇMİŞ", "ÖZGEÇMİŞ", "EK", "EKLER"]) and len(text) < 40:
+                    continue
+                if text.isdigit() or len(text) < 3:
+                    continue
+
                 ref_count += 1
                 issues = []
                 
@@ -988,9 +974,12 @@ class ThesisChecker:
             if not has_visible_borders(table):
                 continue
                 
-            # 2. Yerleşim Kontrolü (Sayfa 1-3 Arası Heuristik)
-            # Eğer tablo ilk bölümlerdeyse (Kapak sayfası vb.) ve yakınında başlık yoksa atla.
-            if i < 5: 
+            # 2. Yerleşim Kontrolü
+            # Kapak sayfası layout tablolarını otomatik atla (İlk 3 tablo)
+            if i < 3:
+                continue
+            
+            if i < 7: 
                 # İlk hücre metnine bakarak kapak sayfası tablosu mu kontrol et
                 first_cell_text = ""
                 try: first_cell_text = table.rows[0].cells[0].text.strip().upper()
@@ -1043,7 +1032,7 @@ class ThesisChecker:
                 ))
     
     def _is_paragraph_bold(self, para) -> bool:
-        """Paragrafın koyu olup olmadığını kontrol et"""
+        """Paragrafın koyu olup olmadığını kontrol et (StyleResolver kullanarak)"""
         has_text = False
         all_bold = True
         
@@ -1053,19 +1042,8 @@ class ThesisChecker:
             
             has_text = True
             
-            if run.font.bold is True:
-                continue
-            
-            rPr = run._element.rPr
-            if rPr is not None:
-                b = rPr.find('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}b')
-                if b is not None:
-                    val = b.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val')
-                    if val is None or val in ('true', '1'):
-                        continue
-            
-            style = para.style
-            if style and hasattr(style, 'font') and style.font.bold is True:
+            # Resolver üzerinden hem manuel hem stil bold özelliğini kontrol et
+            if self.resolver and self.resolver.get_effective_bold(run):
                 continue
             
             all_bold = False
