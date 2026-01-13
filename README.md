@@ -6,7 +6,12 @@ Erzincan Binali Yıldırım Üniversitesi Sosyal Bilimler Enstitüsü **2022 Tez
 ![Streamlit](https://img.shields.io/badge/Streamlit-1.0+-red.svg)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
 
+**🌐 Canlı Uygulama:** [https://tez-kontrol.streamlit.app/](https://tez-kontrol.streamlit.app/)
+
 <a href="https://buymeacoffee.com/bbc_h" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="40" ></a>
+
+> ⚠️ **Önemli Not:** Bu program Python XML üzerinden değerlendirme yaptığı için sonuçlar %100 kesinlikte olmayacaktır. Word sanal makine (virtual machine) üzerinde çalıştığı için, Word üzerinde çalışan bir eklenti (Add-in) daha iyi sonuçlar getirebilir.
+
 
 ## 📋 Özellikler
 
