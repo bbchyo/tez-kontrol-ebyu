@@ -376,14 +376,13 @@ class ThesisChecker:
 
             para_issues = []
             
-            # === Başlık Kontrolü Sonrası ===
-            # Eğer başlık ise normal paragraf kontrollerini (girinti, aralık vb) atla
+            # === 2. Başlık ve Özel Element Kontrolleri (Strict Segregation) ===
             is_cap = is_table_caption(text) or is_figure_caption(text)
             is_ch = is_chapter_heading(text) or (self.last_chapter_para_idx != -1 and i == self.last_chapter_para_idx + 1)
             is_num_h, _ = is_numbered_heading(text)
             
             if is_cap or is_ch or is_num_h:
-                # Özel başlık kontrollerini çalıştır
+                # Başlık-özel kontrolleri (Boyut, Font, Hizalama vb.)
                 if is_table_caption(text):
                     self._check_table_caption(text, location)
                     para_issues.extend(self._check_caption_format(paragraph, text, "Tablo"))
@@ -410,29 +409,43 @@ class ThesisChecker:
                             snippet=get_text_snippet(text, 80)
                         ))
                 
-                # Bölüm başlığı sonrası kuralları çalıştır
+                # Bölüm başlığı sonrası özel kuralları (7cm, 4 satır) çalıştır
                 if is_chapter_heading(text):
                     self._check_chapter_start_rules(i, location)
+                
+                # CRITICAL: Başlıklar paragraf kontrollerine girmemeli
                 continue
 
-            # Normal paragraf
-            elif not self.in_references:
+            # === 3. Blok Alıntı Kontrolü ===
+            if self._is_block_quote(paragraph):
+                issues = self._check_block_quote_format(paragraph, text)
+                if issues:
+                    self._highlight_paragraph(paragraph, self.colors["LAYOUT"])
+                    para_issues.extend(issues)
+                # Blok alıntı da özel bir elementtir, normal paragraf kontrolünden geçebilir 
+                # ama genellikle girinti ve aralıkları farklıdır.
+                # Şimdilik blok alıntı sonrası da hataları kaydedip devam edelim.
+                # Ancak kullanıcı normal paragraf kurallarının ona da uygulanmamasını isteyebilir.
+
+            # === 4. Normal Paragraf Kontrolleri ===
+            if not self.in_references:
                 issues = self._check_normal_paragraph_format(paragraph, text)
                 
                 # Liste öğeleri için girinti ve satır aralığı hatasını filtrele
                 if is_list:
-                    issues = [i for i in issues if i["category"] not in [ErrorCategory.PARAGRAPH, ErrorCategory.LINE_SPACING] or ("girinti" not in i["message"].lower() and "aralık" not in i["message"].lower())]
+                    issues = [iss for iss in issues if iss["category"] not in [ErrorCategory.PARAGRAPH, ErrorCategory.LINE_SPACING] or ("girinti" not in iss["message"].lower() and "aralık" not in iss["message"].lower())]
                     if not issues:
                         self._highlight_paragraph(paragraph, WD_COLOR_INDEX.BRIGHT_GREEN)
                 
                 if issues:
                     # Font hatası varsa KIRMIZI, yoksa SARI (Layout)
-                    color = self.colors["STYLE"] if any("Yazı" in i["category"].name if hasattr(i["category"], "name") else str(i["category"]) for i in issues) else self.colors["LAYOUT"]
+                    color = self.colors["STYLE"] if any("Yazı" in str(iss["category"]) for iss in issues) else self.colors["LAYOUT"]
                     self._highlight_paragraph(paragraph, color)
                 para_issues.extend(issues)
             
-            # Hataları kaydet
+            # Tüm hataları kaydet
             for issue in para_issues:
+                # Çift kaydı önle: Başlıklar 'continue' ile bu kısma gelmez
                 self.errors.append(FormatError(
                     category=issue["category"],
                     message=issue["message"],
@@ -441,11 +454,6 @@ class ThesisChecker:
                     found=issue.get("found", ""),
                     snippet=get_text_snippet(text, 80)
                 ))
-            
-            # Bölüm başlığı sonrası 7cm ve 4 satır kontrolü (Sadece 'BÖLÜM X' sonrası asıl başlığın altı için değil, bizzat başlık için)
-            # Not: Ana loop içinde başlıklar için girinti/boşluk kontrolü bypass edildiği için burada bizzat başlığı kontrol ediyoruz.
-            if is_chapter_heading(text):
-                self._check_chapter_start_rules(i, location)
 
             # Epigraf Kontrolü
             from utils import is_epigraph
