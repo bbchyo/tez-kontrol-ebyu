@@ -12,16 +12,8 @@ Kapsamlı kontroller:
 import re
 from typing import List, Dict, Any, Optional, Set, Tuple
 from collections import defaultdict
-
-# Zemberek opsiyonel (Python 3.13+ ile uyumsuz)
-try:
-    from zemberek import TurkishMorphology
-    ZEMBEREK_AVAILABLE = True
-except ImportError:
-    TurkishMorphology = None
-    ZEMBEREK_AVAILABLE = False
 from docx import Document
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_COLOR_INDEX
 from docx.shared import Pt, Cm
 from docx.oxml.ns import qn
 
@@ -29,7 +21,9 @@ from config import ThesisConfig, FormatError, ErrorCategory, DEFAULT_CONFIG
 from utils import (
     emu_to_cm, twips_to_cm, get_font_size_pt, get_text_snippet, count_words,
     is_chapter_heading, is_numbered_heading,
-    is_table_caption, is_figure_caption, is_uppercase_text
+    is_table_caption, is_figure_caption, is_uppercase_text,
+    is_dialogue_or_transcript, is_list_item, is_source_citation,
+    has_visible_borders, StyleResolver
 )
 
 
@@ -69,9 +63,17 @@ class ThesisChecker:
         self.figures_found: List[str] = []  # Şekil numaraları
         self.in_references: bool = False  # Kaynakça bölümünde mi
         self.headings_found: List[str] = []  # Metinde bulunan başlıklar
-        self.tool = None  # LanguageTool nesnesi
         self.in_english_abstract: bool = False
         self.last_chapter_para_idx: int = -1
+        self.resolver: Optional[StyleResolver] = None
+        
+        # Renk Şeması
+        self.colors = {
+            "LAYOUT": WD_COLOR_INDEX.YELLOW,      # Kenar boşluğu, girinti, aralık
+            "STYLE": WD_COLOR_INDEX.RED,         # Yazı tipi, Boyut, Koyu/İtalik
+            "REFERENCE": WD_COLOR_INDEX.TURQUOISE, # Kaynakça formatı
+            "CONTENT": WD_COLOR_INDEX.BRIGHT_GREEN # Özet kelime sayısı vb.
+        }
     
     def analyze(self, doc_path: str) -> Dict[str, Any]:
         """Tez dosyasını analiz eder."""
@@ -79,6 +81,7 @@ class ThesisChecker:
         
         try:
             self.document = Document(doc_path)
+            self.resolver = StyleResolver(self.document)
         except Exception as e:
             return self._error_report(str(e))
         
@@ -98,9 +101,8 @@ class ThesisChecker:
         self._check_page_numbers()
         self._check_footnotes()
         self._check_element_placement() # Yeni: Görsel yerleşim kontrolü
-        self._check_spelling()
         
-        return self._generate_report()
+        return self._generate_report(), self.document
     
     def _reset(self):
         """Durumu sıfırla"""
@@ -197,12 +199,14 @@ class ThesisChecker:
             if is_section_heading:
                 continue
             
-            if in_abstract and text:
-                # Anahtar Kelimeler veya ABSTRACT gelince dur
-                if text_upper.startswith("ANAHTAR") or "ABSTRACT" in text_upper:
+                # Anahtar Kelimeler gelince dur
+                if "ANAHTAR KELİMELER" in text_upper:
+                    in_abstract = False
+                # Keywords veya ABSTRACT gelince dur
+                elif any(x in text_upper for x in ["KEYWORDS", "ABSTRACT"]):
                     in_abstract = False
                 # Tez başlığı gibi görünen büyük harfli uzun metin gelince dur
-                elif len(text) > 50 and text.isupper():
+                elif len(text) > 100 and text.isupper() and not text.endswith("."):
                     in_abstract = False
                 else:
                     abstract_paragraphs.append(text)
@@ -225,7 +229,8 @@ class ThesisChecker:
                 message=f"Özet çok kısa: {word_count} kelime (minimum {self.config.abstract_min_words})",
                 location="Özet",
                 expected=f"En az {self.config.abstract_min_words} kelime",
-                found=f"{word_count} kelime"
+                found=f"{word_count} kelime",
+                snippet=get_text_snippet(self.abstract_text, 60)
             ))
         elif word_count > self.config.abstract_max_words:
             self.errors.append(FormatError(
@@ -233,7 +238,8 @@ class ThesisChecker:
                 message=f"Özet çok uzun: {word_count} kelime (maksimum {self.config.abstract_max_words})",
                 location="Özet",
                 expected=f"En fazla {self.config.abstract_max_words} kelime",
-                found=f"{word_count} kelime"
+                found=f"{word_count} kelime",
+                snippet=get_text_snippet(self.abstract_text, 60)
             ))
         else:
             self.passed_checks += 1
@@ -271,7 +277,8 @@ class ThesisChecker:
                 message="; ".join(issues),
                 location="Sayfa Düzeni",
                 expected=f"{self.config.margin_top} cm",
-                found="Farklı değerler"
+                found="Farklı değerler",
+                snippet="Sayfa kenar boşlukları ayarları"
             ))
     
     def _check_paragraphs(self):
@@ -280,8 +287,13 @@ class ThesisChecker:
         in_front_matter = True  # Ön sayfalar (önsöz, özet vs)
         
         for i, paragraph in enumerate(self.document.paragraphs):
+            # Boş veya sadece whitespace içeren paragrafları atla
             text = paragraph.text.strip()
             if not text:
+                continue
+            
+            # 2 karakterden kısa ve numerik olmayan metinleri atla (gürültü azaltma)
+            if len(text) < 2 and not text.isdigit():
                 continue
             
             text_upper = text.upper()
@@ -317,6 +329,7 @@ class ThesisChecker:
             if len(text) > 3:
                 f_err = self._check_font(paragraph)
                 if f_err:
+                    self._highlight_paragraph(paragraph, self.colors["STYLE"])
                     self.errors.append(FormatError(
                         category=f_err["category"],
                         message=f_err["message"],
@@ -345,37 +358,77 @@ class ThesisChecker:
                 self.in_references = True
                 continue
             
-            # EK başlıklarını atla
-            if text_upper.startswith("EK ") and len(text) < 100:
-                continue
+            # === AKILLI FİLTRELER (Smart Filters) ===
             
+            # 1. Diyalog / Transkript Atlaması
+            if is_dialogue_or_transcript(text):
+                # Diyaloglar için format kontrollerini -özellikle girinti ve aralık- atla
+                self._highlight_paragraph(paragraph, WD_COLOR_INDEX.BRIGHT_GREEN)
+                continue
+
+            # 2. Kaynak Gösterimi Atlaması (Tablo/Şekil altı)
+            if is_source_citation(text):
+                self._highlight_paragraph(paragraph, WD_COLOR_INDEX.BRIGHT_GREEN)
+                continue
+
+            # 3. Liste Öğesi tespiti (Girinti kontrolü için kullanılacak)
+            is_list = is_list_item(paragraph)
+
             para_issues = []
             
             # Tablo/şekil başlığı kontrolü
             if is_table_caption(text):
                 self._check_table_caption(text, location)
-                para_issues.extend(self._check_caption_format(paragraph, text, "Tablo"))
+                caps = self._check_caption_format(paragraph, text, "Tablo")
+                if caps:
+                    self._highlight_paragraph(paragraph, self.colors["STYLE"])
+                para_issues.extend(caps)
             elif is_figure_caption(text):
                 self._check_figure_caption(text, location)
-                para_issues.extend(self._check_caption_format(paragraph, text, "Şekil"))
+                caps = self._check_caption_format(paragraph, text, "Şekil")
+                if caps:
+                    self._highlight_paragraph(paragraph, self.colors["STYLE"])
+                para_issues.extend(caps)
             
             # Bölüm başlığı
             elif is_chapter_heading(text) or (self.last_chapter_para_idx != -1 and i == self.last_chapter_para_idx + 1):
                 self.headings_found.append(text.upper())
-                para_issues.extend(self._check_chapter_heading_format(paragraph, text, i))
+                issues = self._check_chapter_heading_format(paragraph, text, i)
+                if issues:
+                    self._highlight_paragraph(paragraph, self.colors["STYLE"])
+                para_issues.extend(issues)
             
             # Numaralı başlık
             elif is_numbered_heading(text)[0]:
                 self.headings_found.append(text.upper())
-                para_issues.extend(self._check_subheading_format(paragraph, text))
+                issues = self._check_subheading_format(paragraph, text)
+                if issues:
+                    color = self.colors["STYLE"] if any(i["category"] in [ErrorCategory.FONT, ErrorCategory.FONT_SIZE, ErrorCategory.HEADING] for i in issues) else self.colors["LAYOUT"]
+                    self._highlight_paragraph(paragraph, color)
+                para_issues.extend(issues)
             
             # Blok Alıntı (Girintilere göre tespit et)
             elif self._is_block_quote(paragraph):
-                para_issues.extend(self._check_block_quote_format(paragraph, text))
+                issues = self._check_block_quote_format(paragraph, text)
+                if issues:
+                    self._highlight_paragraph(paragraph, self.colors["LAYOUT"])
+                para_issues.extend(issues)
             
             # Normal paragraf
             elif not self.in_references:
-                para_issues.extend(self._check_normal_paragraph_format(paragraph, text))
+                issues = self._check_normal_paragraph_format(paragraph, text)
+                
+                # Liste öğeleri için girinti ve satır aralığı hatasını filtrele
+                if is_list:
+                    issues = [i for i in issues if i["category"] not in [ErrorCategory.PARAGRAPH, ErrorCategory.LINE_SPACING] or ("girinti" not in i["message"].lower() and "aralık" not in i["message"].lower())]
+                    if not issues:
+                        self._highlight_paragraph(paragraph, WD_COLOR_INDEX.BRIGHT_GREEN)
+                
+                if issues:
+                    # Font hatası varsa KIRMIZI, yoksa SARI (Layout)
+                    color = self.colors["STYLE"] if any("Yazı" in i["category"].name if hasattr(i["category"], "name") else str(i["category"]) for i in issues) else self.colors["LAYOUT"]
+                    self._highlight_paragraph(paragraph, color)
+                para_issues.extend(issues)
             
             # Hataları kaydet
             for issue in para_issues:
@@ -474,17 +527,21 @@ class ThesisChecker:
                         message=f"Bölüm {chapter}'de {item_type} numaralandırması sıralı değil",
                         location=f"{item_type} Numaralandırma",
                         expected=f"1, 2, 3, ...",
-                        found=", ".join(map(str, sorted(nums)))
+                        found=", ".join(map(str, sorted(nums))),
+                        snippet=f"{item_type} dizisi: " + ", ".join(map(str, nums[:5]))
                     ))
     
     def _is_block_quote(self, para) -> bool:
-        """Paragrafın bir blok alıntı olup olmadığını belirle (Girintilere göre)"""
+        """Paragrafın bir blok alıntı olup olmadığını belirle (StyleResolver kullanarak)"""
+        if not self.resolver:
+            return False
+            
         # EBYÜ: Her iki yandan 1.25cm girintili olan metinler blok alıntıdır
-        pf = para.paragraph_format
+        left_indent = self.resolver.get_effective_paragraph_attribute(para, 'left_indent')
+        right_indent = self.resolver.get_effective_paragraph_attribute(para, 'right_indent')
         
-        # Sol ve sağ girintiyi çek (cm cinsinden)
-        left = pf.left_indent.cm if pf.left_indent else 0.0
-        right = pf.right_indent.cm if pf.right_indent else 0.0
+        left = left_indent.cm if hasattr(left_indent, 'cm') else (left_indent / 360000.0 if left_indent else 0.0)
+        right = right_indent.cm if hasattr(right_indent, 'cm') else (right_indent / 360000.0 if right_indent else 0.0)
         
         # 1.0cm ile 1.5cm arası girinti varsa blok alıntı sayalım (Toleranslı 1.25cm)
         return left > 1.0 and right > 1.0
@@ -512,14 +569,14 @@ class ThesisChecker:
             self.passed_checks += 1
             
         # 3. Satır Aralığı (1.0)
-        pf = para.paragraph_format
         self.total_checks += 1
-        if pf.line_spacing is not None and abs(pf.line_spacing - 1.0) > 0.1:
+        actual_ls = self.resolver.get_effective_line_spacing(para) if self.resolver else 1.0
+        if abs(actual_ls - 1.0) > 0.15:
             issues.append({
                 "category": ErrorCategory.PARAGRAPH,
                 "message": "Blok alıntı satır aralığı 1.0 (tek) olmalı",
                 "expected": "1.0",
-                "found": f"{pf.line_spacing:.1f}"
+                "found": f"{actual_ls:.1f}"
             })
         else:
             self.passed_checks += 1
@@ -725,24 +782,18 @@ class ThesisChecker:
         return issues
     
     def _check_paragraph_spacing(self, para) -> Optional[Dict]:
-        """Paragraf boşluğu kontrolü - 6nk / 6nk olmalı"""
+        """Paragraf boşluğu kontrolü - StyleResolver kullanarak kalıtımı çözer."""
         self.total_checks += 1
         
-        pf = para.paragraph_format
-        
-        def get_spacing(p_format, attr):
-            val = getattr(p_format, attr)
-            if val is not None:
-                return val.pt
-            # Stilden çekmeyi dene
-            if hasattr(para, 'style') and para.style:
-                style_val = getattr(para.style.paragraph_format, attr)
-                if style_val is not None:
-                    return style_val.pt
-            return 0.0
+        if not self.resolver:
+            return None
 
-        before = get_spacing(pf, 'space_before')
-        after = get_spacing(pf, 'space_after')
+        # Effective attributes
+        before_val = self.resolver.get_effective_paragraph_attribute(para, 'space_before')
+        after_val = self.resolver.get_effective_paragraph_attribute(para, 'space_after')
+        
+        before = before_val.pt if hasattr(before_val, 'pt') else 0.0
+        after = after_val.pt if hasattr(after_val, 'pt') else 0.0
         
         expected_before = self.config.paragraph_spacing_before
         expected_after = self.config.paragraph_spacing_after
@@ -760,24 +811,24 @@ class ThesisChecker:
         return None
     
     def _check_paragraph_indent(self, para) -> Optional[Dict]:
-        """Paragraf ilk satır girintisi kontrolü - 1.25cm olmalı"""
+        """Paragraf ilk satır girintisi kontrolü - StyleResolver kullanarak kalıtımı çözer."""
         self.total_checks += 1
         
-        pf = para.paragraph_format
+        if not self.resolver:
+            return None
+
+        first_line = self.resolver.get_effective_paragraph_attribute(para, 'first_line_indent')
         expected_cm = self.config.paragraph_first_line_indent  # 1.25
         
-        first_line = pf.first_line_indent
-        
         if first_line is None:
-            # Girinti belirtilmemiş - bu hata olabilir veya stilden geliyor
-            self.passed_checks += 1
-            return None
-        
-        # cm'ye çevir
-        if hasattr(first_line, 'cm'):
-            actual_cm = first_line.cm
+            # Eğer hiç belirtilmemişse 0 sayılır, bu bir hatadır (EBYÜ'de girinti zorunlu)
+            actual_cm = 0.0
         else:
-            actual_cm = first_line / 360000  # EMU to cm
+            # cm'ye çevir
+            if hasattr(first_line, 'cm'):
+                actual_cm = first_line.cm
+            else:
+                actual_cm = first_line / 360000.0  # EMU to cm
         
         # Tolerans: 0.2cm
         if abs(actual_cm - expected_cm) > 0.2:
@@ -792,39 +843,28 @@ class ThesisChecker:
         return None
     
     def _check_line_spacing(self, para) -> Optional[Dict]:
-        """Satır aralığı kontrolü - 1.5 olmalı"""
+        """Satır aralığı kontrolü - StyleResolver kullanarak kalıtımı çözer."""
         self.total_checks += 1
         
-        pf = para.paragraph_format
+        if not self.resolver:
+            return None
+
+        actual = self.resolver.get_effective_line_spacing(para)
         expected = self.config.line_spacing_body  # 1.5
         
-        # Satır aralığı değerini al
-        line_spacing = pf.line_spacing
-        
-        if line_spacing is None:
+        # Word'de 1.5 satır aralığı bazen tam olarak 1.5 gelmez.
+        # 1.25 ile 1.6 arasını kabul ediyoruz.
+        if 1.25 <= actual <= 1.6 and expected == 1.5:
             self.passed_checks += 1
             return None
-        
-        # Eğer float ise doğrudan kontrol et
-        if isinstance(line_spacing, float):
-            if abs(line_spacing - expected) > 0.1:
-                return {
-                    "category": ErrorCategory.LINE_SPACING,
-                    "message": f"Satır aralığı {line_spacing:.1f} (olması gereken: {expected})",
-                    "expected": f"{expected}",
-                    "found": f"{line_spacing:.1f}"
-                }
-        # Eğer Pt ise (çoklu satır aralığı)
-        elif hasattr(line_spacing, 'pt'):
-            # 1.5 satır aralığı yaklaşık 18pt (12pt x 1.5)
-            actual_spacing = line_spacing.pt / 12.0  # 12pt base
-            if abs(actual_spacing - expected) > 0.2:
-                return {
-                    "category": ErrorCategory.LINE_SPACING,
-                    "message": f"Satır aralığı ~{actual_spacing:.1f} (olması gereken: {expected})",
-                    "expected": f"{expected}",
-                    "found": f"~{actual_spacing:.1f}"
-                }
+            
+        if abs(actual - expected) > 0.15:
+            return {
+                "category": ErrorCategory.LINE_SPACING,
+                "message": f"Satır aralığı {actual:.1f} (olması gereken: {expected})",
+                "expected": f"{expected}",
+                "found": f"{actual:.1f}"
+            }
         
         self.passed_checks += 1
         return None
@@ -917,20 +957,48 @@ class ThesisChecker:
                 # İlk 5 hatalı kaynağın snippet'ini göster
                 snippets = [f"{r['loc']}: \"{r['snippet']}\"" for r in refs[:5]]
                 more_text = f" (+{len(refs)-5} daha)" if len(refs) > 5 else ""
-                
                 self.errors.append(FormatError(
-                    category=ErrorCategory.REFERENCE,
-                    message=f"{msg} ({len(refs)} kaynak)",
-                    location="Kaynakça",
-                    expected="APA 7 formatı",
-                    found=f"{len(refs)} kaynak",
-                    snippet="; ".join(snippets) + more_text
-                ))
+                        category=ErrorCategory.REFERENCE,
+                        message=f"{msg} ({len(refs)} kaynak)",
+                        location="Kaynakça",
+                        expected="APA 7 formatı",
+                        found=f"{len(refs)} kaynak",
+                        snippet="; ".join(snippets) + more_text
+                    ))
+            
+            # Kaynakça kısmını işaretle (Turkuaz)
+            in_ref_section = False
+            for para in self.document.paragraphs:
+                if "KAYNAKÇA" in para.text.upper():
+                    in_ref_section = True
+                if in_ref_section:
+                    if is_chapter_heading(para.text) and "KAYNAKÇA" not in para.text.upper():
+                        break
+                    if para.text.strip():
+                        self._highlight_paragraph(para, self.colors["REFERENCE"])
     
     def _check_tables(self):
-        """Tablo içeriklerini kontrol et"""
+        """Tablo içeriklerini kontrol et - Akıllı Filtreleme ile"""
+        from utils import has_visible_borders, is_table_caption
+        
         for i, table in enumerate(self.document.tables):
             table_name = f"Tablo {i + 1}"
+            
+            # 1. Kenarlık Kontrolü (Görünür kenarlık yoksa kesinlikle LAYOUT/GHOST tablodur)
+            if not has_visible_borders(table):
+                continue
+                
+            # 2. Yerleşim Kontrolü (Sayfa 1-3 Arası Heuristik)
+            # Eğer tablo ilk bölümlerdeyse (Kapak sayfası vb.) ve yakınında başlık yoksa atla.
+            if i < 5: 
+                # İlk hücre metnine bakarak kapak sayfası tablosu mu kontrol et
+                first_cell_text = ""
+                try: first_cell_text = table.rows[0].cells[0].text.strip().upper()
+                except: pass
+                
+                if any(x in first_cell_text for x in ["T.C.", "İMZA", "JÜRİ", "DANIŞMAN", "ONAY"]):
+                    continue # Kapak sayfası layout tablosu
+            
             wrong_sizes = set()
             wrong_fonts = set()
             
@@ -944,14 +1012,13 @@ class ThesisChecker:
                             if not run.text.strip():
                                 continue
                             
-                            font = run.font.name
+                            font = self.resolver.get_effective_font_name(run) if self.resolver else run.font.name
                             if font and font != self.config.font_name and font not in ["Symbol", "Wingdings"]:
                                 wrong_fonts.add(font)
                             
-                            if run.font.size:
-                                size = get_font_size_pt(run.font.size)
-                                if size and abs(size - self.config.font_size_table_content) > 0.5:
-                                    wrong_sizes.add(int(size))
+                            size = self.resolver.get_effective_font_size(run) if self.resolver else (run.font.size.pt if run.font.size else None)
+                            if size and abs(size - self.config.font_size_table_content) > 0.5:
+                                wrong_sizes.add(int(size))
             
             issues = []
             if wrong_sizes:
@@ -962,12 +1029,17 @@ class ThesisChecker:
                 issues.append(f"Font: {', '.join(wrong_fonts)}")
             
             if issues:
+                snippet = ""
+                if table.rows:
+                    snippet = get_text_snippet(table.rows[0].cells[0].text, 50)
+                
                 self.errors.append(FormatError(
                     category=ErrorCategory.TABLE,
                     message="; ".join(issues),
                     location=table_name,
                     expected=f"{self.config.font_size_table_content}pt, {self.config.font_name}",
-                    found="Farklı format"
+                    found="Farklı format",
+                    snippet=snippet
                 ))
     
     def _is_paragraph_bold(self, para) -> bool:
@@ -1002,88 +1074,62 @@ class ThesisChecker:
         return has_text and all_bold
     
     def _check_font(self, para) -> Optional[Dict]:
-        """Font kontrolü - Tema fontları ve Varsayılanları da kapsayan derin analiz"""
+        """Font kontrolü - StyleResolver kullanarak kalıtımı çözer."""
         self.total_checks += 1
-        expected = self.config.font_name # "Times New Roman"
+        expected = self.config.font_name  # "Times New Roman"
         
+        if not self.resolver:
+            return None
+
+        wrong_fonts = set()
         for run in para.runs:
             if not run.text.strip():
                 continue
             
-            # 1. Doğrudan Font İsmi
-            font = run.font.name
+            font = self.resolver.get_effective_font_name(run)
             
-            # 2. XML rFonts (Açıkça belirtilenler)
-            rPr = run._element.find(qn('w:rPr'))
-            if font is None and rPr is not None:
-                rFonts = rPr.find(qn('w:rFonts'))
-                if rFonts is not None:
-                    font = rFonts.get(qn('w:ascii')) or rFonts.get(qn('w:hAnsi'))
-                    
-                    # 3. Tema Fontları (asciiTheme, hAnsiTheme)
-                    # Eğer font hala bulunamadıysa ama bir tema tanımlıysa (örn: minorHAnsi -> Calibri)
-                    if font is None:
-                        theme = rFonts.get(qn('w:asciiTheme')) or rFonts.get(qn('w:hAnsiTheme'))
-                        if theme:
-                            # Tema fontları genellikle Times New Roman DEĞİLDİR (Calibri/Arial/Cambria olabilir)
-                            font = f"Tema Fontu ({theme})"
-            
-            # 4. Stil Fontu
-            if font is None and para.style:
-                font = para.style.font.name if hasattr(para.style, 'font') else None
-                
-            # 5. Döküman Varsayılanları (docDefaults)
-            if font is None:
-                try:
-                    # python-docx element.xpath namespaces parametresini desteklemeyebilir, 
-                    # standart yolu kullanalım
-                    style_el = self.document.styles.element
-                    rFonts_def = style_el.xpath('w:docDefaults/w:rPrDefault/w:rPr/w:rFonts')
-                    if rFonts_def:
-                        font = rFonts_def[0].get(qn('w:ascii')) or rFonts_def[0].get(qn('w:asciiTheme'))
-                except Exception:
-                    pass
-            
-            # 6. Kesinleşmeyen Durumlar (Eğer buraya kadar hala TNR bulunamadıysa)
-            if font is None or font == "Default":
-                # Bir font ismi bulunamadıysa Word genellikle Calibri (varsayılan tema) kullanır.
-                # EBYÜ TNR zorunlu kıldığı için bu bir hatadır.
-                font = "Belirlenemyen (Muhtemelen Calibri/Arial)"
-            
-            # Sembolleri ve matematiksel fontları atla
+            # Sembolleri ve özel durumları atla
             if font and font != expected and font not in ["Symbol", "Wingdings", "Cambria Math", "Webdings", "MS Mincho"]:
-                return {
-                    "category": ErrorCategory.FONT,
-                    "message": f"Yanlış yazı tipi: {font}",
-                    "expected": expected,
-                    "found": font
-                }
+                wrong_fonts.add(font)
+        
+        if wrong_fonts:
+            fonts_str = ", ".join(wrong_fonts)
+            return {
+                "category": ErrorCategory.FONT,
+                "message": f"Yanlış yazı tipi: {fonts_str}",
+                "expected": expected,
+                "found": fonts_str
+            }
         
         self.passed_checks += 1
         return None
-    
+
     def _check_size(self, para, expected_pt: int, context: str) -> Optional[Dict]:
-        """Boyut kontrolü"""
+        """Boyut kontrolü - StyleResolver kullanarak kalıtımı çözer."""
         self.total_checks += 1
-        tolerance = self.config.font_size_tolerance_pt
+        tolerance = self.config.font_size_tolerance_pt  # 0.5pt
         
+        if not self.resolver:
+            return None
+
+        wrong_sizes = set()
         for run in para.runs:
             if not run.text.strip():
                 continue
             
-            size = None
-            if run.font.size:
-                size = get_font_size_pt(run.font.size)
-            elif para.style and hasattr(para.style, 'font') and para.style.font.size:
-                size = get_font_size_pt(para.style.font.size)
+            size = self.resolver.get_effective_font_size(run)
             
             if size and abs(size - expected_pt) > tolerance:
-                return {
-                    "category": ErrorCategory.FONT_SIZE,
-                    "message": f"{context} {size:.0f}pt (olması gereken: {expected_pt}pt)",
-                    "expected": f"{expected_pt}pt",
-                    "found": f"{size:.0f}pt"
-                }
+                wrong_sizes.add(size)
+        
+        if wrong_sizes:
+            sizes_str = ", ".join([f"{s:.1f}pt" for s in sorted(wrong_sizes)])
+            return {
+                "category": ErrorCategory.FONT_SIZE,
+                "message": f"{context} {sizes_str} (olması gereken: {expected_pt}pt)",
+                "expected": f"{expected_pt}pt",
+                "found": sizes_str
+            }
         
         self.passed_checks += 1
         return None
@@ -1391,27 +1437,27 @@ class ThesisChecker:
                         return None
 
                     if pPr is not None:
-                        # Hizalama (jc)
+                        # Hizalama (jc) - 'both' veya 'distribute' (justify)
                         jc = pPr.find(qn('w:jc'))
                         val = jc.get(qn('w:val')) if jc is not None else 'left'
-                        if val != 'both': # both = justify
+                        if val not in ['both', 'distribute']:
                             self._add_footnote_error("Dipnot iki yana yaslı olmalı", "İki yana yaslı", val)
                         
                         # Boşluk (spacing)
                         spacing = pPr.find(qn('w:spacing'))
                         if spacing is not None:
-                            before = spacing.get(qn('w:before'))
-                            after = spacing.get(qn('w:after'))
-                            if (before and before != '0') or (after and after != '0'):
-                                self._add_footnote_error("Dipnot aralığı 0nk olmalı", "0nk-0nk")
-                        
-                        # Girinti (ind) - Dipnotlarda genellikle girinti olur
-                        # EBYÜ 2022: Dipnotlar paragraf girintisi ile aynı (1.25cm) başlamalı veya özel kural?
-                        # Genellikle dipnot numarası sonrası boşluk bırakılır.
-                        # Kullanıcı "dipnot hatası var" dediğine göre girinti eksik olabilir.
-                        ind = pPr.find(qn('w:ind'))
-                        if ind is None:
-                            self._add_footnote_error("Dipnot girintisi eksik", "1.25cm veya uygun girinti", "Yok")
+                            before = spacing.get(qn('w:before')) or '0'
+                            after = spacing.get(qn('w:after')) or '0'
+                            line = spacing.get(qn('w:line'))
+                            rule = spacing.get(qn('w:lineRule'))
+
+                            if before != '0' or after != '0':
+                                self._add_footnote_error("Dipnot aralığı 0nk olmalı", "0nk-0nk", f"{before}nk-{after}nk")
+                            
+                            # Satır aralığı 1.0 (single) kontrolü
+                            # rule=auto ve line=240, or rule=atLeast/exact and line=font_size
+                            if rule == 'auto' and line and int(line) > 240:
+                                self._add_footnote_error("Dipnot satır aralığı 1.0 (tek) olmalı", "1.0", f"{int(line)/240:.1f}")
 
 
         except Exception:
@@ -1431,105 +1477,8 @@ class ThesisChecker:
             found=found
         ))
     def _check_spelling(self):
-        """Türkçe yazım denetimi yap (Zemberek) - Abstract ve Kaynakça hariç"""
-        # Zemberek yoksa atla (Python 3.13+ uyumsuzluğu)
-        if not ZEMBEREK_AVAILABLE:
-            return
-            
-        if self.tool is None:
-            try:
-                self.tool = TurkishMorphology.create_with_defaults()
-            except Exception:
-                return 
-        
-        err_count = 0
-        limit = 30 # Maksimum 30 kelime hatası (gürültüyü azalt)
-        
-        # Noktalama işaretlerini temizle
-        clean_text_regex = re.compile(r'[^\w\s]', re.UNICODE)
-        
-        # Bölüm takibi
-        in_english_abstract = False
-        in_references = False
-        passed_abstract = False
-        
-        for para in self.document.paragraphs:
-            if err_count >= limit: break
-            
-            text = para.text.strip()
-            if len(text) < 10: continue
-            text_upper = text.upper()
-            
-            # === ABSTRACT (İngilizce Özet) Bölümü Tespiti ===
-            if "ABSTRACT" in text_upper and len(text) < 30:
-                in_english_abstract = True
-                continue
-            
-            # Abstract'tan çıkış: İçindekiler, GİRİŞ veya başka bir bölüm başlığı
-            if in_english_abstract:
-                if any(x in text_upper for x in ["İÇİNDEKİLER", "GİRİŞ", "TABLOLAR LİSTESİ", "ŞEKİLLER LİSTESİ"]):
-                    in_english_abstract = False
-                    passed_abstract = True
-                elif is_chapter_heading(text):
-                    in_english_abstract = False
-                    passed_abstract = True
-                else:
-                    continue  # Abstract içindeyiz, atla
-            
-            # === KAYNAKÇA Bölümü Tespiti ===
-            if "KAYNAKÇA" in text_upper and len(text) < 20:
-                in_references = True
-                continue
-            
-            # Kaynakça içindeyken atla (İngilizce kaynak adları olabilir)
-            if in_references:
-                # EK başlığı görünce kaynakça biter
-                if text_upper.startswith("EK ") or "EKLER" in text_upper:
-                    in_references = False
-                else:
-                    continue  # Kaynakça içindeyiz, atla
-            
-            # Kelimelere ayır ve kontrol et
-            words = text.split()
-            for word in words:
-                if err_count >= limit: break
-                
-                # Sadece harf içeren kelimeleri kontrol et (sayıları ve sembolleri atla)
-                clean_word = clean_text_regex.sub('', word)
-                if not clean_word or not clean_word.isalpha():
-                    continue
-                
-                # Çok kısa kelimeleri atla (2 harf ve altı)
-                if len(clean_word) <= 2:
-                    continue
-                
-                try:
-                    results = self.tool.analyze(clean_word)
-                    if not results.analysis_results:
-                        # Özel isim olabilir (ilk harf büyükse atla)
-                        if clean_word[0].isupper(): 
-                             continue
-                        
-                        # İngilizce yaygın kelime olabilir mi? (Basit kontrol)
-                        english_common = {"the", "and", "for", "are", "but", "not", "you", "all", "can", "had", 
-                                          "her", "was", "one", "our", "out", "has", "his", "how", "its", "may",
-                                          "new", "now", "old", "see", "way", "who", "did", "get", "let", "put",
-                                          "say", "she", "too", "use", "from", "have", "been", "were", "they",
-                                          "this", "that", "with", "will", "your", "which", "their", "would"}
-                        if clean_word.lower() in english_common:
-                            continue
-                             
-                        self.total_checks += 1
-                        self.errors.append(FormatError(
-                            category=ErrorCategory.SPELLING,
-                            message=f"Bilinmeyen kelime veya yazım hatası: {clean_word}",
-                            location="Metin Genel",
-                            found=clean_word,
-                            snippet=get_text_snippet(text, 60)
-                        ))
-                        err_count += 1
-                except Exception:
-                    continue
+        """Yazım denetimi kaldırıldı (Zemberek bağımlılığı nedeniyle)."""
+        pass
 
     def _check_chapter_start_rules(self, para_idx: int, location: str):
         """Bölüm başlığı öncesi 4 satır boşluk ve 7cm kuralını kontrol eder"""
@@ -1588,7 +1537,17 @@ class ThesisChecker:
             
         return issues
 
-def analyze_thesis(doc_path: str, config: ThesisConfig = None) -> Dict[str, Any]:
+
+    def _highlight_paragraph(self, para, color):
+        """Paragraftaki tüm run'ları belirtilen renkle vurgular."""
+        for run in para.runs:
+            run.font.highlight_color = color
+
+    def _highlight_run(self, run, color):
+        """Belirli bir run'ı vurgular."""
+        run.font.highlight_color = color
+
+def analyze_thesis(doc_path: str, config: ThesisConfig = None) -> Tuple[Dict[str, Any], Document]:
     """Tez dosyasını analiz et"""
     checker = ThesisChecker(config)
     return checker.analyze(doc_path)

@@ -6,8 +6,10 @@ Bu modül birim dönüşümleri, regex desenleri ve diğer yardımcı fonksiyonl
 """
 
 import re
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Any, Dict
 from docx.shared import Pt, Cm, Emu, Twips
+from docx.oxml.ns import qn
+from docx.enum.text import WD_LINE_SPACING
 
 
 # === BİRİM DÖNÜŞÜM SABİTLERİ ===
@@ -129,6 +131,169 @@ def pt_to_twips(pt: float) -> int:
         Twips cinsinden değer
     """
     return int(pt * TWIPS_PER_PT)
+
+
+
+class StyleResolver:
+    """
+    Word dökümanlarındaki stil kalıtımını (inheritance) çözen yardımcı sınıf.
+    """
+    def __init__(self, doc):
+        self.doc = doc
+        self.styles = doc.styles
+        self.doc_defaults = self._get_doc_defaults()
+
+    def _get_doc_defaults(self) -> Dict[str, Any]:
+        """Döküman varsayılanlarını (docDefaults) ayıklar."""
+        defaults = {
+            "font_name": None, 
+            "font_size": None,
+            "line_spacing": None,
+            "line_spacing_rule": None,
+            "space_before": None,
+            "space_after": None,
+            "alignment": None
+        }
+        try:
+            # Font varsayılanları (rPrDefault)
+            rPr_def = self.styles.element.xpath('w:docDefaults/w:rPrDefault/w:rPr')
+            if rPr_def:
+                rPr = rPr_def[0]
+                # Yazı tipi
+                rFonts = rPr.find(qn('w:rFonts'))
+                if rFonts is not None:
+                    defaults["font_name"] = rFonts.get(qn('w:ascii')) or rFonts.get(qn('w:hAnsi'))
+                # Yazı boyutu
+                sz = rPr.find(qn('w:sz'))
+                if sz is not None:
+                    defaults["font_size"] = int(sz.get(qn('w:val'))) / 2.0
+
+            # Paragraf varsayılanları (pPrDefault)
+            pPr_def = self.styles.element.xpath('w:docDefaults/w:pPrDefault/w:pPr')
+            if pPr_def:
+                pPr = pPr_def[0]
+                # Boşluklar
+                spacing = pPr.find(qn('w:spacing'))
+                if spacing is not None:
+                    before = spacing.get(qn('w:before'))
+                    after = spacing.get(qn('w:after'))
+                    line = spacing.get(qn('w:line'))
+                    rule = spacing.get(qn('w:lineRule'))
+                    
+                    if before: defaults["space_before"] = int(before)
+                    if after: defaults["space_after"] = int(after)
+                    if line: defaults["line_spacing"] = int(line)
+                    if rule: defaults["line_spacing_rule"] = rule
+                
+                # Hizalama
+                jc = pPr.find(qn('w:jc'))
+                if jc is not None:
+                    defaults["alignment"] = jc.get(qn('w:val'))
+        except Exception:
+            pass
+        return defaults
+
+    def get_effective_font_name(self, run) -> str:
+        """Run için geçerli yazı tipini bulur."""
+        # 1. Manuel Formatlama
+        if run.font.name:
+            return run.font.name
+        
+        # XML kontrolü (Tema vs.)
+        rPr = run._element.find(qn('w:rPr'))
+        if rPr is not None:
+            rFonts = rPr.find(qn('w:rFonts'))
+            if rFonts is not None:
+                font = rFonts.get(qn('w:ascii')) or rFonts.get(qn('w:hAnsi'))
+                if font: return font
+                
+                # Tema Fontları
+                theme = rFonts.get(qn('w:asciiTheme')) or rFonts.get(qn('w:hAnsiTheme'))
+                if theme:
+                    # EBYÜ: Theme fontları genellikle TNR veya Calibri'dir.
+                    # Eğer döküman TNR üzerine kuruluysa theme fontları TNR olabilir.
+                    # Ancak tespiti zor olduğundan, eğer theme varsa ve name yoksa
+                    # 'Times' kelimesini arayalım.
+                    if "minor" in theme: return "Times New Roman" # Çoğu akademik şablonda minor TNR'dır
+                    return f"Tema ({theme})"
+
+        # 2. Paragraf Stili ve Kalıtım
+        style = run._parent.style if hasattr(run._parent, 'style') else None
+        while style:
+            if hasattr(style, 'font') and style.font.name:
+                return style.font.name
+            style = style.base_style
+            
+        # 3. Döküman Varsayılanları
+        return self.doc_defaults.get("font_name") or "Calibri"
+
+    def get_effective_font_size(self, run) -> Optional[float]:
+        """Run için geçerli yazı boyutunu bulur."""
+        # 1. Manuel Formatlama
+        if run.font.size:
+            return run.font.size.pt
+            
+        # XML kontrolü
+        rPr = run._element.find(qn('w:rPr'))
+        if rPr is not None:
+            sz = rPr.find(qn('w:sz'))
+            if sz is not None:
+                return int(sz.get(qn('w:val'))) / 2.0
+
+        # 2. Paragraf Stili ve Kalıtım
+        style = run._parent.style if hasattr(run._parent, 'style') else None
+        while style:
+            if hasattr(style, 'font') and style.font.size:
+                return style.font.size.pt
+            style = style.base_style
+            
+        # 3. Döküman Varsayılanları
+        return self.doc_defaults.get("font_size") or 11.0
+
+    def get_effective_paragraph_attribute(self, paragraph, attr_name: str) -> Any:
+        """Paragraf özelliği için kalıtımı çözer (space_before, alignment vb.)"""
+        # 1. Manuel Formatlama (Direct formatting)
+        pf = paragraph.paragraph_format
+        val = getattr(pf, attr_name)
+        if val is not None:
+            return val
+
+        # 2. Stil ve Kalıtım
+        style = paragraph.style
+        while style:
+            if hasattr(style, 'paragraph_format'):
+                val = getattr(style.paragraph_format, attr_name)
+                if val is not None:
+                    return val
+            style = style.base_style
+            
+        # 3. Döküman Varsayılanları
+        # Not: attr_name docx.enum adlandırmasıyla docDefaults XML adlandırması farklıdır.
+        # Basit eşleştirme yapıyoruz.
+        return self.doc_defaults.get(attr_name)
+
+    def get_effective_line_spacing(self, paragraph) -> float:
+        """Geçerli satır aralığını bulur (float olarak)."""
+        rule = self.get_effective_paragraph_attribute(paragraph, 'line_spacing_rule')
+        val = self.get_effective_paragraph_attribute(paragraph, 'line_spacing')
+
+        if rule == WD_LINE_SPACING.ONE_POINT_FIVE:
+            return 1.5
+        if rule == WD_LINE_SPACING.DOUBLE:
+            return 2.0
+        if rule == WD_LINE_SPACING.SINGLE:
+            return 1.0
+        
+        # Eğer line_spacing bir float ise (multiple spacing)
+        if isinstance(val, float):
+            return val
+            
+        # Eğer Pt nesnesi ise (exact veya at least)
+        if hasattr(val, 'pt'):
+            # 12pt font için 1.5 aralık ≈ 18pt
+            return round(val.pt / 12.0, 1)
+
+        return 1.0
 
 
 def get_font_size_pt(size) -> Optional[float]:
@@ -342,7 +507,7 @@ def is_reference_paragraph(paragraph) -> bool:
     return "bibliography" in style_name.lower() or "kaynakça" in style_name.lower() or "reference" in style_name.lower()
 
 
-def get_text_snippet(text: str, max_length: int = 80) -> str:
+def get_text_snippet(text: Optional[str], max_length: int = 80) -> str:
     """
     Metinden kısa bir parça döndürür.
     
@@ -353,6 +518,8 @@ def get_text_snippet(text: str, max_length: int = 80) -> str:
     Returns:
         Kısaltılmış metin
     """
+    if not text:
+        return ""
     text = text.strip()
     if len(text) <= max_length:
         return text
@@ -369,13 +536,31 @@ def count_words(text: str) -> int:
 
 def is_uppercase_text(text: str) -> bool:
     """
-    Metnin tamamının büyük harf olup olmadığını kontrol eder.
+    Metnin büyük harf olup olmadığını kontrol eder.
+    Bağlaçlar (ve, veya, ile, and, or vb.) küçük harf olabilir kuralını uygular.
     """
-    # Sadece harfleri kontrol et
-    letters = [c for c in text if c.isalpha()]
-    if not letters:
-        return True
-    return all(c.isupper() for c in letters)
+    if not text:
+        return False
+        
+    conjunctions = {
+        "ve", "veya", "ile", "ya", "da", "de", "ki", "mi", "mı", "mu", "mü",
+        "and", "or", "with", "the", "in", "on", "at", "by"
+    }
+    
+    words = text.split()
+    if not words:
+        return False
+        
+    for word in words:
+        clean_word = "".join(c for c in word if c.isalnum())
+        if not clean_word:
+            continue
+            
+        if clean_word.lower() not in conjunctions:
+            if not clean_word.isupper():
+                return False
+                
+    return True
 
 
 def is_title_case(text: str) -> bool:
@@ -436,6 +621,29 @@ def validate_alignment(alignment, expected: str) -> bool:
         actual = str(alignment).lower()
     
     return actual == expected.lower()
+def has_visible_borders(table) -> bool:
+    """
+    Tablonun görünür kenarlıkları olup olmadığını kontrol eder.
+    Kenarlıklar 'nil' veya 'none' ise False döndürür.
+    """
+    try:
+        tbl_pr = table._element.xpath('./w:tblPr')[0]
+        borders = tbl_pr.xpath('./w:tblBorders')
+        if not borders:
+            return False
+            
+        # Herhangi bir kenarlık 'nil' değilse ve varsa görünür kabul edilir
+        for side in ['top', 'left', 'bottom', 'right', 'insideH', 'insideV']:
+            border = borders[0].xpath(f'./w:{side}')
+            if border:
+                val = border[0].get(qn('w:val'))
+                if val and val not in ['nil', 'none']:
+                    return True
+    except Exception:
+        pass
+    return False
+
+
 def is_epigraph(paragraph) -> bool:
     """
     Paragrafın epigraf (aktarılan söz) olup olmadığını kontrol eder.
@@ -462,3 +670,56 @@ def is_chapter_title_only(text: str) -> bool:
     """
     text = text.strip().upper()
     return bool(re.match(r"^(BİRİNCİ|İKİNCİ|ÜÇÜNCÜ|DÖRDÜNCÜ|BEŞİNCİ|ALTINCI|YEDİNCİ|SEKİZİNCİ|DOKUZUNCU|ONUNCU)\s+BÖLÜM$", text))
+
+
+def is_dialogue_or_transcript(text: str) -> bool:
+    """
+    Metnin bir görüşme transkripti veya diyalog olup olmadığını kontrol eder.
+    Örnek: 'A:', 'Ö1:', 'Araştırmacı:', 'Grup Problemi:'
+    """
+    if not text:
+        return False
+    # Regex: Cümle başında 'A:', 'Ö1:', 'Grup:' gibi kalıpları ara
+    # Regex: ^([A-ZÖÇŞİĞÜ][a-zöçşiğü]*\s*\d*|A|K|E|Ö)\s*:
+    import re
+    pattern = r'^([A-ZÖÇŞİĞÜ][a-zöçşiğü]*\s*\d*|A|K|E|Ö)\s*:'
+    return bool(re.match(pattern, text.strip()))
+
+
+def is_list_item(paragraph) -> bool:
+    """
+    Paragrafın bir liste öğesi olup olmadığını kontrol eder.
+    """
+    # 1. XML seviyesinde numaralandırma kontrolü
+    try:
+        if paragraph._p.pPr is not None and paragraph._p.pPr.numPr is not None:
+            return True
+    except Exception:
+        pass
+        
+    # 2. Metin başında liste işareti kontrolü
+    text = paragraph.text.strip()
+    if not text:
+        return False
+        
+    list_markers = ['•', '-', '*', '+', '>']
+    if text[0] in list_markers:
+        return True
+        
+    # Sayısal liste (1., 2. veya a), b) gibi)
+    import re
+    if re.match(r'^\d+[\.\)]\s', text) or re.match(r'^[a-z][\.\)]\s', text, re.I):
+        return True
+        
+    return False
+
+
+def is_source_citation(text: str) -> bool:
+    """
+    Metnin bir kaynak gösterimi olup olmadığını kontrol eder.
+    Örnek: 'Kaynak: ...', 'Source: ...'
+    """
+    if not text:
+        return False
+    text_upper = text.strip().upper()
+    return text_upper.startswith("KAYNAK:") or text_upper.startswith("SOURCE:")

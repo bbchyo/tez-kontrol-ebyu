@@ -13,6 +13,7 @@ import tempfile
 import os
 import json
 from datetime import datetime
+import io
 
 from config import ThesisConfig, DEFAULT_CONFIG
 from checker import analyze_thesis
@@ -180,7 +181,7 @@ def generate_report_text(results: dict, filename: str) -> str:
     return "\n".join(lines)
 
 
-def display_results(results: dict, filename: str):
+def display_results(results: dict, filename: str, marked_doc=None):
     """Sonuçları göster"""
     
     # Metrikler
@@ -222,16 +223,32 @@ def display_results(results: dict, filename: str):
         </div>
         """, unsafe_allow_html=True)
     
-    # Rapor indirme
+    # İndirme seçenekleri
     st.markdown("---")
-    report_text = generate_report_text(results, filename)
-    st.download_button(
-        label="📥 Raporu İndir (.txt)",
-        data=report_text,
-        file_name=f"tez_rapor_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
-        mime="text/plain",
-        use_container_width=True
-    )
+    col_dl1, col_dl2 = st.columns(2)
+    
+    with col_dl1:
+        report_text = generate_report_text(results, filename)
+        st.download_button(
+            label="📥 Analiz Raporunu İndir (.txt)",
+            data=report_text,
+            file_name=f"tez_rapor_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+            mime="text/plain",
+            use_container_width=True
+        )
+    
+    if marked_doc:
+        doc_io = io.BytesIO()
+        marked_doc.save(doc_io)
+        doc_io.seek(0)
+        with col_dl2:
+            st.download_button(
+                label="📥 İşaretlenmiş Dosyayı İndir (.docx)",
+                data=doc_io,
+                file_name=f"isaretlenmis_{filename}",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True
+            )
     
     st.markdown("---")
     
@@ -294,9 +311,9 @@ def main():
             
             try:
                 with st.spinner("Analiz ediliyor..."):
-                    results = analyze_thesis(tmp_path, config)
+                    results, marked_doc = analyze_thesis(tmp_path, config)
                 
-                display_results(results, uploaded_file.name)
+                display_results(results, uploaded_file.name, marked_doc)
                 
             except Exception as e:
                 st.error(f"Hata: {str(e)}")
