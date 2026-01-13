@@ -690,16 +690,9 @@ class ThesisChecker:
         else:
             self.passed_checks += 1
         
-        # Girinti kontrolü (1.25cm)
-        indent_issue = self._check_paragraph_indent(para)
-        if indent_issue:
-            issues.append(indent_issue)
-            
-        # Boşluk kontrolü (6nk/6nk)
-        spacing_issue = self._check_paragraph_spacing(para)
-        if spacing_issue:
-            issues.append(spacing_issue)
-            
+        # Girinti ve Boşluk kontrolleri alt başlıklar için pas geçiliyor
+        # (Kılavuza göre başlıkların kendine has kuralları var, gövde metni kuralları uygulanmaz)
+        
         # Title Case kontrolü
         from utils import is_title_case
         if not is_title_case(text):
@@ -833,14 +826,31 @@ class ThesisChecker:
         if not self.resolver:
             return None
 
-        actual = self.resolver.get_effective_line_spacing(para)
-        expected = self.config.line_spacing_body  # 1.5
+        from utils import is_dialogue_or_transcript, is_source_citation, is_list_item
+        text = para.text.strip()
         
-        # Word'de 1.5 satır aralığı bazen tam olarak 1.5 gelmez.
-        # 1.25 ile 1.6 arasını kabul ediyoruz.
-        if 1.25 <= actual <= 1.6 and expected == 1.5:
+        # === AKILLI ATLAMALAR (Human-like Bypass) ===
+        if is_dialogue_or_transcript(text) or is_source_citation(text) or is_list_item(para):
             self.passed_checks += 1
             return None
+
+        actual = self.resolver.get_effective_line_spacing(para)
+        expected = self.config.line_spacing_body  # Varsayılan 1.5
+        
+        # Eğer dipnot veya tablo/şekil içindeyse expected 1.0 olabilir.
+        # Bu fonksiyon şu an genel kullanılıyor, config'deki expected neyse ona bakıyor.
+        # (Body metni için varsayılan 1.5 gelir)
+        
+        # Word'ün "1.5 satır aralığı" render farklılığına tolerans (1.25 - 1.65)
+        if expected == 1.5:
+            if 1.25 <= actual <= 1.65:
+                self.passed_checks += 1
+                return None
+        # Word'ün "1.0 (tek) satır aralığı" toleransı (0.9 - 1.15)
+        elif expected == 1.0:
+            if 0.9 <= actual <= 1.15:
+                self.passed_checks += 1
+                return None
             
         if abs(actual - expected) > 0.15:
             return {
@@ -865,12 +875,25 @@ class ThesisChecker:
             if "KAYNAKÇA" in text.upper() and len(text) < 20:
                 in_ref = True
                 continue
-            
+            if in_ref and text:
+                # Kaynakça bitti mi kontrol et (Yeni bölüm başlığı gelirse bitir)
+                from utils import is_chapter_heading
+                if is_chapter_heading(text):
+                    break
+
                 # 0. Gürültü Filtresi: Başlık ve boş satırları atla
                 text_upper = text.upper()
-                if any(x in text_upper for x in ["KISALTMALAR LİSTESİ", "ÖZ GEÇMİŞ", "ÖZGEÇMİŞ", "EK", "EKLER"]) and len(text) < 40:
+                
+                # Başlık tespiti: Genelde hepsi büyük ve kısa olur
+                is_structural_header = (text_upper == text and len(text.split()) < 5)
+                
+                # Gürültü kelimeleri veya yapısal başlıklar
+                noise_keywords = ["KISALTMALAR LİSTESİ", "ÖZ GEÇMİŞ", "ÖZGEÇMİŞ", "EK", "EKLER", "ÖNSÖZ", "ÖN SÖZ"]
+                if any(x in text_upper for x in noise_keywords) and len(text) < 40:
                     continue
-                if text.isdigit() or len(text) < 3:
+                
+                # Kısa metinler veya sadece numara olanlar (Sayfa numarası vb.)
+                if is_structural_header or text.isdigit() or len(text.split()) < 3:
                     continue
 
                 ref_count += 1
@@ -975,18 +998,19 @@ class ThesisChecker:
                 continue
                 
             # 2. Yerleşim Kontrolü
-            # Kapak sayfası layout tablolarını otomatik atla (İlk 3 tablo)
-            if i < 3:
-                continue
-            
-            if i < 7: 
-                # İlk hücre metnine bakarak kapak sayfası tablosu mu kontrol et
-                first_cell_text = ""
-                try: first_cell_text = table.rows[0].cells[0].text.strip().upper()
-                except: pass
+            # Kapak sayfası veya yapısal tabloları (ilk tablolar) otomatik atla
+            # Eğer tablo ilk bölümlerdeyse ve yakınında "Tablo X" başlığı yoksa layout sayılır.
+            if i < 5:
+                # Yakınında (üstteki 3 paragraf) başlık var mı kontrol et
+                # Not: i tablo indexidir, paragraph indexine ulaşıp bakmak daha doğru
+                # Ancak self.document.paragraphs üzerinden arama yapmak pahalı olabilir.
+                # Heuristik: Eğer tablo indexi 0-2 arasıysa (ilk 3 tablo) kesin atla.
+                if i < 3:
+                    continue
                 
-                if any(x in first_cell_text for x in ["T.C.", "İMZA", "JÜRİ", "DANIŞMAN", "ONAY"]):
-                    continue # Kapak sayfası layout tablosu
+                # 3. ve 4. tablolar için de gürültü azaltma (Görünür kenarlık kontrolü zaten yapıldı)
+                # Kılavuza göre ilk sayfalarda çok fazla tablo gürültüsü olabiliyor.
+                pass 
             
             wrong_sizes = set()
             wrong_fonts = set()
