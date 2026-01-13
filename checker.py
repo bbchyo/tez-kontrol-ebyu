@@ -910,8 +910,8 @@ class ThesisChecker:
                 if any(x in text_upper for x in noise_keywords) and len(text) < 40:
                     continue
                 
-                # Kısa metinler veya sadece numara olanlar (Sayfa numarası vb.)
-                if is_structural_header or text.isdigit() or len(text.split()) < 3:
+                # Kısa metinler, sadece numara olanlar veya kısaltma tanımları (A: B şeklinde)
+                if is_structural_header or text.isdigit() or len(text.split()) < 3 or (":" in text and len(text.split(":")[0]) < 10):
                     continue
 
                 ref_count += 1
@@ -1011,8 +1011,9 @@ class ThesisChecker:
         for i, table in enumerate(self.document.tables):
             table_name = f"Tablo {i + 1}"
             
-            # 1. Kenarlık Kontrolü (Görünür kenarlık yoksa kesinlikle LAYOUT/GHOST tablodur)
-            if not has_visible_borders(table):
+            # 1. Kenarlık ve Satır Sayısı Kontrolü
+            # Görünür kenarlık yoksa veya 2 satırdan az ise kesinlikle LAYOUT tablodur
+            if not has_visible_borders(table) or len(table.rows) < 2:
                 continue
                 
             # 2. Bağlam Kontrolü (Tablo metni içermeyen tabloları atla)
@@ -1073,24 +1074,35 @@ class ThesisChecker:
                 ))
     
     def _is_paragraph_bold(self, para) -> bool:
-        """Paragrafın koyu olup olmadığını kontrol et (StyleResolver kullanarak)"""
-        has_text = False
-        all_bold = True
+        """Paragrafın koyu olup olmadığını kontrol et (StyleResolver kullanarak kalıtımla)"""
+        if not self.resolver:
+            return False
+
+        # 1. Stil bizzat kalınlık dayatıyor mu? (e.g. Heading 1)
+        if self.resolver.get_effective_font_bold(para) is True:
+            return True
+
+        # 2. Karakter bazlı eşik analizi
+        bold_chars = 0
+        total_chars = 0
         
         for run in para.runs:
-            if not run.text.strip():
+            clean_text = run.text.strip()
+            if not clean_text:
                 continue
             
-            has_text = True
+            text_len = len(clean_text)
+            total_chars += text_len
             
-            # Resolver üzerinden hem manuel hem stil bold özelliğini kontrol et
-            if self.resolver and self.resolver.get_effective_bold(run):
-                continue
-            
-            all_bold = False
-            break
+            # Run bazlı kalınlık (Manuel + Karakter Stili + Paragraf Stili)
+            if self.resolver.is_run_bold(run, para):
+                bold_chars += text_len
         
-        return has_text and all_bold
+        if total_chars == 0:
+            return False
+            
+        # Paragrafın %80'inden fazlası koyu ise (dipnot/numara kaynaklı sapmaları önlemek için)
+        return (bold_chars / total_chars) > 0.8
     
     def _check_font(self, para) -> Optional[Dict]:
         """Font kontrolü - StyleResolver kullanarak kalıtımı çözer."""

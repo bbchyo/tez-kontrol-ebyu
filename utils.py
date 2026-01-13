@@ -265,6 +265,31 @@ class StyleResolver:
             
         return False
 
+    def get_effective_font_bold(self, paragraph) -> bool:
+        """Paragraf stilinden kalınlık (bold) özelliğini çözümler."""
+        style = paragraph.style
+        while style:
+            if hasattr(style, 'font') and style.font.bold is not None:
+                return style.font.bold
+            style = style.base_style
+        return False
+
+    def is_run_bold(self, run, paragraph) -> bool:
+        """Run için kalınlık özelliğini çözümler (run stili + paragraf stili)."""
+        # 1. Manuel run formatlama
+        if run.bold is not None:
+            return run.bold
+            
+        # 2. Run stili (e.g. Strong)
+        style = run.style
+        while style:
+            if hasattr(style, 'font') and style.font.bold is not None:
+                return style.font.bold
+            style = style.base_style
+             
+        # 3. Paragraf stili kalıtımı
+        return self.get_effective_font_bold(paragraph)
+
     def get_effective_paragraph_attribute(self, paragraph, attr_name: str) -> Any:
         """Paragraf özelliği için kalıtımı çözer (space_before, alignment vb.)"""
         # 1. Manuel Formatlama (Direct formatting)
