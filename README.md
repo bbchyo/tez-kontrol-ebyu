@@ -36,6 +36,21 @@ Bu program Word (.docx) formatındaki tez dosyalarını analiz ederek format hat
 | **Özet** | 200-250 kelime | ✅ |
 | **Sayfa Numarası** | 10pt, ortalı | ✅ |
 
+### 🤖 AI İçerik Analizi (YENİ!)
+
+Google Gemini AI kullanarak tezinizin mantıksal tutarlılığını ve içerik kalitesini değerlendirin:
+
+| Kontrol | Açıklama |
+|---------|----------|
+| **Özet Değerlendirmesi** | "Ne, Niçin, Nasıl" sorularına cevap veriyor mu? |
+| **Özet Sayfa Kontrolü** | Tek sayfayı aşıyor mu? |
+| **Başlık Formatı** | BÜYÜK HARF, numaralandırma formatı |
+| **Tablo/Şekil Numaralandırma** | Tablo 1.1:, Şekil 2.1: formatı |
+| **Giriş-Sonuç Tutarlılığı** | Araştırma soruları yanıtlanmış mı? |
+| **Akademik Dil** | Bilimsel dil ve terminoloji |
+
+> 💡 **Not:** AI analizi için [Google AI Studio](https://aistudio.google.com/apikey)'dan ücretsiz API anahtarı almanız gerekmektedir.
+
 ## 🚀 Kurulum
 
 ```bash
@@ -84,8 +99,9 @@ for category, errors in results['grouped_errors'].items():
 
 ```
 tez-kontrol-ebyu/
-├── app.py              # Streamlit web arayüzü
-├── checker.py          # Ana analiz motoru
+├── streamlit_app.py    # Streamlit web arayüzü
+├── checker.py          # Format analiz motoru
+├── ai_analyzer.py      # AI içerik analizi (Gemini)
 ├── config.py           # Konfigürasyon ve kurallar
 ├── utils.py            # Yardımcı fonksiyonlar
 ├── requirements.txt    # Python bağımlılıkları
