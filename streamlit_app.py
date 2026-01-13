@@ -18,6 +18,12 @@ import io
 from config import ThesisConfig, DEFAULT_CONFIG
 from checker import analyze_thesis
 
+# AI Analyzer (opsiyonel - API key girilirse aktif)
+try:
+    from ai_analyzer import ThesisAIAnalyzer, GEMINI_AVAILABLE
+except ImportError:
+    GEMINI_AVAILABLE = False
+
 
 # Sayfa yapılandırması
 st.set_page_config(
@@ -104,6 +110,24 @@ def create_sidebar_config() -> ThesisConfig:
     # Varsayılana dön butonu
     if st.sidebar.button("🔄 Varsayılana Dön", use_container_width=True):
         st.rerun()
+    
+    # AI API Key
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("## 🤖 AI Analizi")
+    
+    if GEMINI_AVAILABLE:
+        api_key = st.sidebar.text_input(
+            "🔑 Gemini API Anahtarı",
+            type="password",
+            help="Google AI Studio'dan API anahtarınızı alın: https://aistudio.google.com/apikey",
+            key="gemini_api_key"
+        )
+        if api_key:
+            st.sidebar.success("✓ API anahtarı girildi")
+        else:
+            st.sidebar.info("AI analizi için API anahtarı girin")
+    else:
+        st.sidebar.warning("google-generativeai paketi yüklü değil")
     
     # Buy Me a Coffee
     st.sidebar.markdown("---")
@@ -287,6 +311,38 @@ def display_results(results: dict, filename: str, marked_doc=None):
         st.markdown("""<div class="success-box">✅ <strong>Tebrikler!</strong> Tezinizde format hatası bulunamadı.</div>""", unsafe_allow_html=True)
 
 
+def display_ai_results(results: dict):
+    """AI analiz sonuçlarını göster"""
+    
+    # Özet sayfa kontrolü
+    st.markdown("### 📋 Özet Sayfa Kontrolü")
+    if results.get('abstract_overflow'):
+        st.markdown(f"""<div class="warning-box">{results['abstract_message']}</div>""", unsafe_allow_html=True)
+    else:
+        st.markdown(f"""<div class="success-box">{results['abstract_message']}</div>""", unsafe_allow_html=True)
+    
+    # İstatistikler
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Toplam Kelime", f"{results.get('total_words', 0):,}")
+    with col2:
+        st.metric("Toplam Karakter", f"{results.get('total_chars', 0):,}")
+    with col3:
+        sections = results.get('sections_found', [])
+        st.metric("Bulunan Bölümler", len(sections))
+    
+    # AI Analizi
+    st.markdown("---")
+    st.markdown("### 🧠 AI Mantık ve İçerik Analizi")
+    st.markdown("*Gemini AI tarafından EBYÜ 2022 Kılavuzu'na göre değerlendirildi*")
+    
+    ai_analysis = results.get('ai_analysis', '')
+    if ai_analysis:
+        st.markdown(ai_analysis)
+    else:
+        st.warning("AI analizi yapılamadı.")
+
+
 def main():
     """Ana uygulama"""
     
@@ -296,35 +352,91 @@ def main():
     # Sidebar
     config = create_sidebar_config()
     
-    # Dosya yükleme
-    uploaded_file = st.file_uploader(
-        "📤 Tez dosyası (.docx)",
-        type=["docx"],
-        help="Word belgesi seçin"
-    )
+    # Tab yapısı - her zaman görünür
+    tab1, tab2 = st.tabs(["📐 Format Kontrolü", "🧠 AI İçerik Analizi"])
     
-    if uploaded_file:
-        if st.button("🔍 Analiz Et", type="primary", use_container_width=True):
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp:
-                tmp.write(uploaded_file.getvalue())
-                tmp_path = tmp.name
-            
-            try:
-                with st.spinner("Analiz ediliyor..."):
-                    results, marked_doc = analyze_thesis(tmp_path, config)
+    with tab1:
+        st.markdown("### Format Analizi")
+        st.markdown("Tezinizin EBYÜ 2022 Kılavuzu'na göre format uyumluluğunu kontrol edin.")
+        
+        uploaded_file_format = st.file_uploader(
+            "📤 Tez dosyası (.docx)",
+            type=["docx"],
+            help="Word belgesi seçin",
+            key="format_uploader"
+        )
+        
+        if uploaded_file_format:
+            if st.button("🔍 Format Analizi Yap", type="primary", use_container_width=True, key="format_btn"):
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp:
+                    tmp.write(uploaded_file_format.getvalue())
+                    tmp_path = tmp.name
                 
-                display_results(results, uploaded_file.name, marked_doc)
-                
-            except Exception as e:
-                st.error(f"Hata: {str(e)}")
-            
-            finally:
                 try:
-                    os.unlink(tmp_path)
-                except:
-                    pass
-    else:
-        st.info("📤 Bir .docx tez dosyası yükleyerek başlayın. Sol menüden denetim ayarlarını düzenleyebilirsiniz.")
+                    with st.spinner("Format analiz ediliyor..."):
+                        results, marked_doc = analyze_thesis(tmp_path, config)
+                    
+                    display_results(results, uploaded_file_format.name, marked_doc)
+                    
+                except Exception as e:
+                    st.error(f"Hata: {str(e)}")
+                
+                finally:
+                    try:
+                        os.unlink(tmp_path)
+                    except:
+                        pass
+        else:
+            st.info("📤 Bir .docx tez dosyası yükleyerek format analizine başlayın.")
+    
+    with tab2:
+        st.markdown("### AI Mantık ve İçerik Analizi")
+        st.markdown("Gemini AI kullanarak tezinizin mantıksal tutarlılığını ve içerik kalitesini değerlendirin.")
+        
+        api_key = st.session_state.get('gemini_api_key', '')
+        
+        if not GEMINI_AVAILABLE:
+            st.error("❌ google-generativeai paketi yüklü değil. `pip install google-generativeai` komutunu çalıştırın.")
+        elif not api_key:
+            st.warning("⚠️ AI analizi için sol menüden Gemini API anahtarınızı girin.")
+            st.markdown("""
+            **API Anahtarı Nasıl Alınır?**
+            1. [Google AI Studio](https://aistudio.google.com/apikey) adresine gidin
+            2. "Create API Key" butonuna tıklayın
+            3. Anahtarı kopyalayın ve sol menüye yapıştırın
+            """)
+        else:
+            uploaded_file_ai = st.file_uploader(
+                "📤 Tez dosyası (.docx)",
+                type=["docx"],
+                help="Word belgesi seçin",
+                key="ai_uploader"
+            )
+            
+            if uploaded_file_ai:
+                if st.button("🧠 AI Analizi Başlat", type="primary", use_container_width=True, key="ai_btn"):
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp:
+                        tmp.write(uploaded_file_ai.getvalue())
+                        tmp_path = tmp.name
+                    
+                    try:
+                        with st.spinner("AI analiz yapılıyor... (Bu işlem 30-60 saniye sürebilir)"):
+                            analyzer = ThesisAIAnalyzer(api_key)
+                            analyzer.load_document(tmp_path)
+                            results = analyzer.analyze_thesis_content()
+                        
+                        display_ai_results(results)
+                        
+                    except Exception as e:
+                        st.error(f"AI Analiz Hatası: {str(e)}")
+                    
+                    finally:
+                        try:
+                            os.unlink(tmp_path)
+                        except:
+                            pass
+            else:
+                st.info("📤 Bir .docx tez dosyası yükleyerek AI analizine başlayın.")
 
 
 if __name__ == "__main__":
